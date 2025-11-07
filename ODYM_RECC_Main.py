@@ -33,6 +33,11 @@ import TIMES-EU emission factors for engineered materials (3_EI_EmissionIntensit
 and apply to sum of primary and secondary material production
 """
 
+"""
+2025-11-07: use version of ODYM_RECC_Main adapted for RECC-TIMES model coupling, as of Nov. 07, 2025, as starting point for RECC-CE
+"""
+
+
 #def main():
 # Import required libraries:
 import os
