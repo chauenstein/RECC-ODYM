@@ -33,6 +33,7 @@ import TIMES-EU emission factors for engineered materials (3_EI_EmissionIntensit
 and apply to sum of primary and secondary material production
 """
 
+
 #def main():
 # Import required libraries:
 import os
@@ -67,7 +68,7 @@ __version__ = str('2.5')
 ##################################
 
 # 2025-09-22, ch: loading of ODYM packages according to ODYM version prior to summer 2025
-# add ODYM module directory to system path
+# add ODYM module directory to system path (not needed in case of new odym version)
 sys.path.insert(0, os.path.join(os.path.join(RECC_Paths.odym_path,'odym'),'modules'))
 
 ### 1.1.) Read main script parameters
@@ -83,6 +84,7 @@ while Model_Configsheet.cell(DebugCounter+1, 3).value != 'Logging_Verbosity':
 ScriptConfig['Logging_Verbosity'] = Model_Configsheet.cell(DebugCounter+1,4).value # Read loggin verbosity once entry was reached.    
 # Extract user name from main file
 ProjectSpecs_User_Name     = getpass.getuser()
+
 
  # 2025-09-22, ch: loading of ODYM packages according to ODYM version prior to summer 2025
 # import packages whose location is now on the system path:    
@@ -236,8 +238,12 @@ SwitchTime = Nc-Nt+1 # Index of first model year (2016)
 # 2.4) Read model data and parameters.
 Mylog.info('Read model data and parameters.')
 
+
+#2025-11-10, ch: use if statement instead of try-except in order to have specific error messages for reading parameter files shown again
 ParFileName = os.path.join(RECC_Paths.data_path,'RECC_ParameterDict_' + ScriptConfig['RegionalScope'] + '.dat')
-try: # Load Pickle parameter dict to save processing time
+ParFileName_name = 'RECC_ParameterDict_' + ScriptConfig['RegionalScope'] + '.dat'
+#try: # Load Pickle parameter dict to save processing time
+if ParFileName_name in os.listdir(RECC_Paths.data_path):
     ParFileObject = open(ParFileName,'rb')  
     ParameterDict = pickle.load(ParFileObject)
     Mylog.info('Read model data and parameters from pickled file with pickle file /parameter reading sequence UUID ' + ParameterDict['Checkkey'])
@@ -280,7 +286,8 @@ try: # Load Pickle parameter dict to save processing time
     else: #if no new parameter data was read
         Mylog.info('Model data and parameters were read from pickled file with pickle file /parameter reading sequence UUID ' + ParameterDict['Checkkey'])
     ParFileObject.close()      
-except:
+#except:
+else:
     msf.check_dataset(RECC_Paths.data_path,PL_Names,PL_Version,PL_SubFolder,Mylog)
     ParameterDict = {}
     mo_start = 0 # set mo for re-reading a certain parameter
