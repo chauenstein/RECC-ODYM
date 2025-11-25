@@ -947,7 +947,7 @@ if 'app' in SectorList:
 pC_AgeCohortHist           = np.zeros((NG,Nr))
 #pC_FutureStock             = np.zeros((NS,NG,Nr))
 # a) from historic data:
-# TODO 2025-13-11 mg: should we do this as well for the industry sector?
+# TODO 2025-13-11 mg: adapt accordingly for industry sector as inflow driven model will only work for the future?
 if 'pav' in SectorList:
     Stocks_2016_passvehicles   = ParameterDict['2_S_RECC_FinalProducts_2015_passvehicles'].Values[0,:,:,:].sum(axis=0)
     pCStocks_2016_passvehicles = np.einsum('pr,r->rp',Stocks_2016_passvehicles,1/ParameterDict['2_P_Population_Reference'].Values[0,0,:,1]) 
@@ -1267,7 +1267,7 @@ ExitFlags = {} # Exit flags for individual model runs
 # Select and loop over scenarios
 #for mS in range(0,NS):
 for mS in range(2,NS): #SSP2 only
-    for mR in range(0,NR):
+    for mR in range(1,NR):
     #for mR in range(1,NR): #RCP2.6 only
 
         SName = IndexTable.loc['Scenario'].Classification.Items[mS]
@@ -1562,9 +1562,9 @@ for mS in range(2,NS): #SSP2 only
         Outflow_Detail_UsePhase_Ng  = np.zeros((Nt,Nc,NN,No)) # index structure: tcNo. Unit: million m².
         Inflow_Detail_UsePhase_Ng   = np.zeros((Nt,NN,No))    # index structure: tNo.  Unit: million m².         
         
-        Stock_Detail_UsePhase_I     = np.zeros((Nt,Nc,NI,Nl)) # index structure: tcIL. Unit: GW.
-        Outflow_Detail_UsePhase_I   = np.zeros((Nt,Nc,NI,Nl)) # index structure: tcIl. Unit: GW.
-        Inflow_Detail_UsePhase_I    = np.zeros((Nt,NI,Nl))    # index structure: tIl.  Unit: GW.
+        Stock_Detail_UsePhase_I     = np.zeros((Nt,Nc,NI,Nr)) # index structure: tcIL. Unit: GW.
+        Outflow_Detail_UsePhase_I   = np.zeros((Nt,Nc,NI,Nr)) # index structure: tcIl. Unit: GW.
+        Inflow_Detail_UsePhase_I    = np.zeros((Nt,NI,Nr))    # index structure: tIl.  Unit: GW.
     
         Stock_Detail_UsePhase_a     = np.zeros((Nt,Nc,Na,No)) # index structure: tcao. Unit: # of items (1).
         Outflow_Detail_UsePhase_a   = np.zeros((Nt,Nc,Na,No)) # index structure: tcao. Unit: # of items (1).
@@ -2084,11 +2084,11 @@ for mS in range(2,NS): #SSP2 only
             
             # 2025-13-11 mg: changed eleven regions Nl to to individual region Nr
             SF_Array                    = np.zeros((Nc,Nc,NI,Nr)) # survival functions, by year, age-cohort, good, and region. PDFs are stored externally because recreating them with scipy.stats is slow.
-            i_Inflow_ind = RECC_System.ParameterDict['1_F_RECC_FinalProducts_industry'].Values[:,:,:,:,:]   ### dimensions: rSRgt of TotalFutureInflow_UsePhase_ind # 2025-14-11 mg: use region indices (Sector_ind_regions_indx) to select right regions
+            i_Inflow_ind = RECC_System.ParameterDict['1_F_RECC_FinalProducts_industry'].Values[:,:,:,:,:]   ### dimensions: rSRgt of TotalFutureInflow_UsePhase_ind
             '''if RECC_System.ParameterDict['1_F_RECC_FinalProducts_industry'].Values[:,:,:,:,:].shape[0] < len(Sector_ind_regions_indx):
                 Mylog.error('Number of regions selected in config exceeds the number of regions available in industry sector inflow file. Check 1F_RECC_FinalProducts_industry dimensions.')
                 raise Exception('Region index mismatch for industry sector inflow calculation.')'''
-            # QUESTION 2025-13-11 mg: the inflows have to be made available for the regions to be selected in r -> disaggregation necessary?
+            # TODO 2025-13-11 mg: the inflows have to be made available for the regions to be selected in r dimension 
             
             # set lifetime parameter
             # First, Simply replicate lifetimes for all age-cohorts 
@@ -2124,7 +2124,7 @@ for mS in range(2,NS): #SSP2 only
                             RECC_dsm_ind_o[r,mS,mR,I,:]          = RECC_dsm_ind.compute_outflow_total()
  
                             Stock_Detail_UsePhase_I[:,:,I,r]     = RECC_dsm_ind_s_c[r,mS,mR,I,SwitchTime-1::,:]
-                            Outflow_Detail_UsePhase_I[:,:,I,r]   = RECC_dsm_ind_s_c_o_c[r,mS,mR,I,SwitchTime-1::,:]
+                            Outflow_Detail_UsePhase_I[:,:,I,r]   = RECC_dsm_ind_s_c_o_c[r,mS,mR,I,SwitchTime-1::,:] #TODO 2025-20-11 mg: replace with param outflow file, matching dimensions (Nr,NS,NR,NI,Nc) #data will first be without age cohort -> calculate cohort with t-remaining lifetime (ensure integer)
                             Outflow_Detail_UsePhase_I[0,:,I,r]   = 0 # no flow calculation in first year
                             Inflow_Detail_UsePhase_I[:,I,r]      = i_Inflow_ind[r,mS,mR,I,SwitchTime-1::] # index structure: tIr
                             Inflow_Detail_UsePhase_I[0,I,r]      = 0 # no flow calculation in first year
@@ -2415,7 +2415,7 @@ for mS in range(2,NS): #SSP2 only
             # Outflow, 'all' elements only:
             RECC_System.FlowDict['F_7_8'].Values[:,:,:,Sector_ind_rge,:,0] = \
             np.einsum('Itcrm,tcIr->Itcrm',Par_3_MC_Stock_ByElement_Nr[:,:,:,Sector_ind_rge,:,0],Outflow_Detail_UsePhase_I)*1000 # all elements, Indices='t,c,r,I,m'
-            # Inflow as mass balance, to account for renovation material inflows to other age-cohorts than the current one (t=c). # TODO: 2025-17-11 mg: ask chris why calculating the np.diff and why not also considering the elemental composition?
+            # Inflow as mass balance, to account for renovation material inflows to other age-cohorts than the current one (t=c). # TODO: 2025-17-11 mg: why calculating the np.diff and why not also considering the elemental composition?
             RECC_System.FlowDict['F_6_7'].Values[1::,:,Sector_ind_rge,:,0]   = \
             np.einsum('Itcrm->Itrm',np.diff(RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,0],1,axis=1)) + np.einsum('Itcrm->Itrm',RECC_System.FlowDict['F_7_8'].Values[1::,:,:,Sector_ind_rge,:,0])
             # inflow of materials in new products, for checking:
@@ -2425,6 +2425,7 @@ for mS in range(2,NS): #SSP2 only
             
 
         # 1_Nl_No) Inflow, outflow and stock first year for Nl and No regional aggregation and Sector I and a
+        #TODO 2025-25-11 mg: delete Nl sector 
         RECC_System.FlowDict['F_6_7_Nl'].Values[0,:,Sector_ind_rge_reg,:,:]   = \
         np.einsum('Ilme,Il ->Ilme',Par_3_MC_Stock_ByElement_Nl[SwitchTime-1,:,Sector_ind_rge_reg,:,:],Inflow_Detail_UsePhase_I[0,:,:])/1000 # all elements, Indices='t,l,I,m,e'  # TODO: 2025-18-11 mg: why /1000 if values are in kilotons?
         RECC_System.FlowDict['F_6_7_No'].Values[0,:,Sector_app_rge_reg,:,:]   = \
