@@ -124,6 +124,8 @@ import scipy.stats
 from scipy.interpolate import make_interp_spline
 import pylab
 import pickle
+from scipy.optimize import minimize_scalar
+import warnings
 
 import RECC_Paths # Import path file
 log.getLogger('matplotlib.font_manager').disabled = True    # required for preventing debugging messages in some console versions
@@ -518,6 +520,10 @@ except:
         raise AssertionError('Fatal: All selected items for aspect I must also be selected for aspect g. Exiting the script.')
     else:
         Sector_ind_rge = []
+try:
+    Sector_ind_list = IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('I')].Items
+except:
+    Sector_ind_list = np.nan
 try:
     Sector_ind_regions = IndexTable.Classification[IndexTable.index.get_loc('Region_Focus')].Items #returns list of selected regions for industry sector
 except:
@@ -1693,10 +1699,12 @@ for mS in range(2,NS): #SSP2 only
         Outflow_Detail_UsePhase_Ng  = np.zeros((Nt,Nc,NN,No)) # index structure: tcNo. Unit: million m².
         Inflow_Detail_UsePhase_Ng   = np.zeros((Nt,NN,No))    # index structure: tNo.  Unit: million m².         
         
-        Stock_Detail_UsePhase_I     = np.zeros((Nt,Nc,NI,Nr)) # index structure: tcIL. Unit: GW.
-        Outflow_Detail_UsePhase_I   = np.zeros((Nt,Nc,NI,Nr)) # index structure: tcIl. Unit: GW.
-        Inflow_Detail_UsePhase_I    = np.zeros((Nt,NI,Nr))    # index structure: tIl.  Unit: GW.
+        Stock_Detail_UsePhase_I     = np.zeros((Nt,Nc,NI,Nr)) # index structure: tcIr. Unit: GW.
+        Outflow_Detail_UsePhase_I   = np.zeros((Nt,Nc,NI,Nr)) # index structure: tcIr. Unit: GW.
+        Inflow_Detail_UsePhase_I    = np.zeros((Nt,NI,Nr))    # index structure: tIr.  Unit: GW.
         Stock_2020_decline_I        = np.zeros((Nt,NI,Nr))    # index structure: tIr.  Unit: GW.
+        TotalStockCurves_UsePhase_I = np.zeros((Nt,NI,Nr))    # index structure: tIr.  Unit: GW 
+
 
     
         Stock_Detail_UsePhase_a     = np.zeros((Nt,Nc,Na,No)) # index structure: tcao. Unit: # of items (1).
@@ -2235,32 +2243,155 @@ for mS in range(2,NS): #SSP2 only
         # Sector: Industry, SSP_32 regions
         if 'ind' in SectorList:
             
+            
             Mylog.info('Calculate inflows and outflows for use phase, industry.')
 
-            # 1) Import already pre-processed stock and flows from ESM of choice
-            #inflow_ESM = RECC_System.ParameterDict['1_F_RECC_FinalProducts_Future_industry_TIMES_preprocessed'].Values[:,:,:,:,:] ### dimensions: rSRIc
-            #outflow_ind_by_cohort = RECC_System.ParameterDict['1_F_RECC_Outflows_industry_TIMES_preprocessed'].Values[:,:,:,:,:,:] ### dimensions: rSRItc
-            #stock_ind_by_cohort = RECC_System.ParameterDict['2_IUS_RECC_Stock_industry_TIMES_preprocessed'].Values[:,:,:,:,:,:] ### dimensions: rSRItc
-            inflow_ESM = RECC_System.ParameterDict['1_F_RECC_FinalProducts_industry'].Values[:,:,:,:,:] ### dimensions: rSRIc #20260216: update structure ESM data and processing in RECC-CE
-            outflow_ind_by_cohort = RECC_System.ParameterDict['1_F_RECC_Outflows_FinalProducts_industry'].Values[:,:,:,:,:,:] ### dimensions: rSRItc #20260216: update structure ESM data and processing in RECC-CE
-            TotalStock_UsePhase_Hist_rIc = RECC_System.ParameterDict['2_S_RECC_FinalProducts_2015_industry'].Values[:,:,0,:] ### dimensions ESM stock: rItc #20260216: update structure ESM data and processing in RECC-CE
-
-            #2) Calculate future stock and assign stocks and flows by cohort to conatainers
-            #Stock_Detail_UsePhase_I[:,:,:,:]     = np.einsum('rItc->tcIr',stock_ind_by_cohort[:,mS,mR,:,:,:])
-            # add initial stock
-            Stock_Detail_UsePhase_I[0,:,:,:]     = np.einsum('rIc->cIr',TotalStock_UsePhase_Hist_rIc).copy()
-            # calculate future stock by forwarding last year's stock and adding stock change
-            for t in range(1,Nt):
-                Stock_Detail_UsePhase_I[t,:,:,:] = Stock_Detail_UsePhase_I[t-1,:,:,:] \
-                    - np.einsum('rIc->cIr',outflow_ind_by_cohort[:,mS,mR,:,t,:])
-                Stock_Detail_UsePhase_I[t,SwitchTime-1+t,:,:] = \
-                    np.einsum('rI->Ir',inflow_ESM[:,mS,mR,:,SwitchTime-1+t]) # for inflow_ESM t and c equivalent
             
-            Outflow_Detail_UsePhase_I[:,:,:,:]   = np.einsum('rItc->tcIr',outflow_ind_by_cohort[:,mS,mR,:,:,:])
-            Inflow_Detail_UsePhase_I[:,:,:]      = np.einsum('rIc->cIr',inflow_ESM[:,mS,mR,:,SwitchTime-1::])
-        
-            TotalStockCurves_UsePhase_I = np.zeros((Nt,NI,Nr))
-            TotalStockCurves_UsePhase_I[:,:,:] = Stock_Detail_UsePhase_I[:,:,:,:].sum(axis=1)
+            # =============================================================================
+            # 1) Import data (stock, age_cohort distribution, inflows from ESM)
+            # =============================================================================
+            stock_age_cohort_distribution = ParameterDict['3_SHA_RECC_Industry_AgeCohortDistribution_Stock2015'].Values[:,:,:,0] #shape rIc with only values for selected reference year (as stated in filename)
+            inflow_ESM = RECC_System.ParameterDict['1_F_RECC_FinalProducts_industry'].Values[:,:,:,:,:] #dimensions: rSRIc -> now only select SSP2 and RCP2.6 (rIc)
+            inflow_ESM [:,:,:,:,:SwitchTime] = 0 #set inflow to year 2015 to zero
+            reported_stock = RECC_System.ParameterDict['2_S_RECC_FinalProducts_2015_industry'].Values  
+            stock_ESM_2015_raw = reported_stock[:,:,:,:,0] #shape rSRI, now selected for reference year 2015
+            lifetimes = np.einsum('cr,I->Irc',np.ones((Nc,Nr)),RECC_System.ParameterDict['3_LT_RECC_ProductLifetime_industry'].Values)
+            
+            #assign age_cohort dimension to 2015 stock
+            stock_ESM_2015 = np.einsum("rSRI,rIc -> rSRIc", stock_ESM_2015_raw, stock_age_cohort_distribution)
+
+            # =============================================================================
+            # 2) Create empty containers
+            # =============================================================================
+            SF_Array                = np.zeros((Nc,Nc,NI,Nr)) # survival functions, by year, age-cohort, good, and region
+            RECC_dsm_ind_s_c        = np.zeros((Nr,NS,NR,NI,Nc,Nc))
+            RECC_dsm_ind_s_c_o_c    = np.zeros((Nr,NS,NR,NI,Nc,Nc))
+            RECC_dsm_ind_o          = np.zeros((Nr,NS,NR,NI,Nc))
+            Inflow                  = np.zeros((Nt,Nr,NI))
+            
+            # =============================================================================
+            # 3) Pre-compute survival functions for all technologies and regions
+            #    (independent of scenario, so done outside the scenario loop)
+            # =============================================================================
+
+            Inflow_zeros = np.zeros(Nc)  # dummy inflow to extract SF only
+
+            for I in range(NI):
+                for r in range(Nr):
+                    LifeTimes = lifetimes[I, r, :]  # shape (Nc,) — mean lifetime per cohort year
+                    lt = {
+                        'Type'  : 'Normal',
+                        'Mean'  : LifeTimes,
+                        'StdDev': 0.3 * LifeTimes
+                    }
+                    sf = dsm.DynamicStockModel(time_dsm, i=Inflow_zeros, lt=lt).compute_sf()
+                    # Ensure no same-year outflow (preserves mass balance at cohort birth year)
+                    np.fill_diagonal(sf, 1)
+                    SF_Array[:, :, I, r] = sf
+
+            # =============================================================================
+            # 4) Build and run the integrated model for each technology, region, scenario
+            # =============================================================================
+
+            for I in tqdm(range(NI), unit=' EGT types'):
+                for r in range(Nr):
+
+                    sf = SF_Array[:, :, I, r]  # shape (Nc, Nc)
+
+                    # ------------------------------------------------------------------
+                    # 4a) INFLOW-DRIVEN PART (new cohorts from SwitchTime onward)
+                    #     Uses ESM inflows for a single scenario combination (mS, mR)
+                    # ------------------------------------------------------------------
+                    RECC_dsm_ind = dsm.DynamicStockModel(
+                        time_dsm,
+                        i=inflow_ESM[r, mS, mR, I, :].copy(),
+                        lt=lt  # lt not used; sf is assigned directly below
+                    )
+                    RECC_dsm_ind.sf = sf.copy()
+
+                    RECC_dsm_ind_s_c[r, mS, mR, I, :, :]     = RECC_dsm_ind.compute_s_c_inflow_driven()
+                    RECC_dsm_ind_s_c_o_c[r, mS, mR, I, :, :] = RECC_dsm_ind.compute_o_c_from_s_c()
+                    RECC_dsm_ind_o[r, mS, mR, I, :]           = RECC_dsm_ind.compute_outflow_total()
+
+                    # Slice to modeling horizon (SwitchTime onward = 2016 onward, index 116)
+                    new_s_c   = RECC_dsm_ind_s_c[r, mS, mR, I, SwitchTime-1:, :]     # (Nt, Nc)
+                    new_o_c   = RECC_dsm_ind_s_c_o_c[r, mS, mR, I, SwitchTime-1:, :] # (Nt, Nc)
+
+                    # ------------------------------------------------------------------
+                    # 4b) HISTORIC COHORT PART (stock that existed before SwitchTime)
+                    #
+                    #     For each cohort c < SwitchTime, we know the stock size in 2015
+                    #     (index SwitchTime-2, i.e. the year before modeling starts).
+                    #     We project it forward using conditional survival:
+                    #
+                    #         S(t, c) = S_2015(c) * SF[t, c] / SF[SwitchTime-2, c]
+                    #
+                    #     The conditioning on SF[SwitchTime-2, c] accounts for the fact
+                    #     that these units have already survived to 2015; we only want
+                    #     the forward-looking depletion from 2015 onward.
+                    #
+                    #     Note: SwitchTime=116 (1-based) corresponds to 2016
+                    #           => 2015 is at 0-based index SwitchTime-1 = 115
+                    # ------------------------------------------------------------------
+
+                    # Index of 2015 in the full timeline (0-based)
+                    idx_2015 = SwitchTime - 1  # = 115
+
+                    # Historic stock-by-cohort over the full timeline, shape (Nc, Nc) => (time, cohort)
+                    hist_s_c_full = np.zeros((Nc, Nc))
+                    hist_o_c_full = np.zeros((Nc, Nc))
+
+                    for c in range(SwitchTime):  # cohorts 0 .. SwitchTime-2 = 0..114 (pre-2015)
+                        sf_at_2015 = sf[idx_2015, c]
+
+                        if sf_at_2015 <= 0:
+                            # Cohort fully depleted by 2015 — nothing to carry forward
+                            continue
+
+                        stock_2015_c = stock_ESM_2015[r, mS, mR, I, c]  # scalar
+
+                        if stock_2015_c <= 0:
+                            continue
+
+                        # Conditional survival from 2015 onward
+                        # sf[t, c] / sf[idx_2015, c] gives probability of surviving to t given survival to 2015
+                        hist_s_c_full[idx_2015:, c] = stock_2015_c * (
+                            sf[idx_2015:, c] / sf_at_2015
+                        )
+
+                    # Outflows = year-on-year decrease in each cohort's stock
+                    # diff along time axis; pad first row with zeros (no outflow in 2015 itself)
+                    hist_o_c_full[1:, :] = np.maximum(
+                        -np.diff(hist_s_c_full, axis=0), 0
+                    )
+
+                    # Slice to modeling horizon
+                    hist_s_c = hist_s_c_full[SwitchTime-1:, :]  # (Nt, Nc)
+                    hist_o_c = hist_o_c_full[SwitchTime-1:, :]  # (Nt, Nc)
+
+                    # ------------------------------------------------------------------
+                    # 4c) COMBINE both parts and store
+                    # ------------------------------------------------------------------
+
+                    Stock_Detail_UsePhase_I[:, :, I, r]   = new_s_c   + hist_s_c
+                    Outflow_Detail_UsePhase_I[:, :, I, r] = new_o_c   + hist_o_c
+
+                    # No outflow in the first year (handover year) by convention
+                    Outflow_Detail_UsePhase_I[0, :, I, r] = 0
+
+                    # Inflows: only from ESM (historic cohorts don't generate new inflows)
+                    Inflow_Detail_UsePhase_I[:, I, r]    = inflow_ESM[r, mS, mR, I, SwitchTime-1:]
+                    Inflow_Detail_UsePhase_I[0, I, r]    = 0  # no inflow in first modeling year
+
+            divergence = np.einsum("rIt -> tIr", reported_stock[:,mS, mR, :, :]) - Stock_Detail_UsePhase_I[:,:,:,:].sum(axis=1)
+
+            # =============================================================================
+            # 5) Aggregate to total stock curves
+            # =============================================================================
+
+            # Sum over cohort dimension (axis=1) to get total stock per year, technology, region
+            TotalStockCurves_UsePhase_I[:, :, :] = Stock_Detail_UsePhase_I.sum(axis=1)
+
 
             StockCurves_Totl[:,Sector_ind_loc,mS,mR] = TotalStockCurves_UsePhase_I[:,:,:].sum(axis=1).sum(axis=1).copy()
             StockCurves_Prod[:,Sector_ind_rge,mS,mR] = TotalStockCurves_UsePhase_I[:,:,:].sum(axis=2).copy()
@@ -2272,7 +2403,6 @@ for mS in range(2,NS): #SSP2 only
             StockCurves_Prod_pr[:,:,Sector_ind_rge,mS,mR]   = np.einsum('tcIr->trI',Stock_Detail_UsePhase_I).copy() # 2025-01-20, ch CIRCOMOD reporting
 
 
-            
         # Sector: Appliances, global coverage, will be calculated separately and waste will be added to wast mgt. inflow for 1st region.
         if 'app' in SectorList:            
             Mylog.info('Calculate inflows and outflows for use phase, appliances.')
