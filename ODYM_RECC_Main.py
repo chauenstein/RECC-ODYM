@@ -2574,7 +2574,7 @@ for mS in range(2,NS): #SSP2 only
             Par_RECC_MC_Nr[:,:,Sector_nrb_rge,:,mS,mR,:]      = np.einsum('mNrct->Ncmrt',RECC_System.ParameterDict['3_MC_RECC_NonResBuildings_t'].Values[:,:,:,:,:,mS,mR])
         '''Par_RECC_MC_Nl = np.zeros((Nc,Nm,NL,Nl,NS))          # for electricity generation technologies in kt/GW'''
         if 'ind' in SectorList:
-            Par_RECC_MC_Nr[:,:,Sector_ind_rge,:,mS,mR,:]        = np.einsum('rct,Im->Icmrt',np.ones((Nr,Nc,Nt)), RECC_System.ParameterDict['3_MC_RECC_industry'].Values[:,:])      #3_MC_RECC_industry has dimensions Im
+            Par_RECC_MC_Nr[:,:,Sector_ind_rge,:,mS,mR,:]        = np.einsum('rct,Imt->Icmrt',np.ones((Nr,Nc,Nt)), RECC_System.ParameterDict['3_MC_RECC_industry'].Values[:,:,:])
             '''Par_RECC_MC_Nl[:,:,Sector_ind_rge_reg,:,mS]        = np.einsum('lc,Im->Icml',np.ones((Nl,Nc)), RECC_System.ParameterDict['3_MC_RECC_industry'].Values[:,:])       # TODO 2025-14-11 mg: delete Par_RECC_MC_Nl if not further used?'''
         Par_RECC_MC_No = np.zeros((Nc,Nm,NO,No,NS))          # for appliances in g/unit, nonres. buildings in kg/m²
         if 'app' in SectorList:
