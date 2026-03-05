@@ -2243,7 +2243,6 @@ for mS in range(2,NS): #SSP2 only
         # Sector: Industry, SSP_32 regions
         if 'ind' in SectorList:
             
-            
             Mylog.info('Calculate inflows and outflows for use phase, industry.')
 
             
@@ -2267,11 +2266,10 @@ for mS in range(2,NS): #SSP2 only
             RECC_dsm_ind_s_c        = np.zeros((Nr,NS,NR,NI,Nc,Nc))
             RECC_dsm_ind_s_c_o_c    = np.zeros((Nr,NS,NR,NI,Nc,Nc))
             RECC_dsm_ind_o          = np.zeros((Nr,NS,NR,NI,Nc))
-            Inflow                  = np.zeros((Nt,Nr,NI))
             
             # =============================================================================
             # 3) Pre-compute survival functions for all technologies and regions
-            #    (independent of scenario, so done outside the scenario loop)
+            #    (independent of scenario -> done outside the scenario loop)
             # =============================================================================
 
             Inflow_zeros = np.zeros(Nc)  # dummy inflow to extract SF only
@@ -2289,83 +2287,126 @@ for mS in range(2,NS): #SSP2 only
                     np.fill_diagonal(sf, 1)
                     SF_Array[:, :, I, r] = sf
 
-            # =============================================================================
-            # 4) Build and run the integrated model for each technology, region, scenario
-            # =============================================================================
+            # ========================================================================================================
+            # 4) Build and run the integrated model for each technology, region, scenario and handle early retirements
+            # ========================================================================================================
 
             for I in tqdm(range(NI), unit=' EGT types'):
                 for r in range(Nr):
 
                     sf = SF_Array[:, :, I, r]  # shape (Nc, Nc)
+                    idx_2015 = SwitchTime - 1  # = 115
 
                     # ------------------------------------------------------------------
-                    # 4a) INFLOW-DRIVEN PART (new cohorts from SwitchTime onward)
-                    #     Uses ESM inflows for a single scenario combination (mS, mR)
+                    # Detect early retirement year for technology I
+                    # Must be done before 4a) and 4b) as both parts need t_retire_abs
                     # ------------------------------------------------------------------
-                    RECC_dsm_ind = dsm.DynamicStockModel(
-                        time_dsm,
-                        i=inflow_ESM[r, mS, mR, I, :].copy(),
-                        lt=lt  # lt not used; sf is assigned directly below
-                    )
-                    RECC_dsm_ind.sf = sf.copy()
+                    reported_from_2015 = reported_stock[r, mS, mR, I, :]
+                    zero_mask = reported_from_2015 == 0
+                    if zero_mask.any():
+                        first_zero_rel = np.argmax(zero_mask) 
+                        if first_zero_rel > 0 and np.all(zero_mask[first_zero_rel:]): #checks whether the first zero in the array occurs after index 0. If the very first entry is already zero, it means the technology either never existed in this region/scenario, or only appears later — neither of which is an early retirement
+                            t_retire_abs = idx_2015 + first_zero_rel
+                            Mylog.info(f"Early retirement detected in region {Sector_ind_regions[r]} for technology {Sector_ind_list[I]}. Survival function was scaled accordingly to meet early retirement path.")
+                        else:
+                            t_retire_abs = None
+                    else:
+                        t_retire_abs = None
+
+                    # ------------------------------------------------------------------
+                    # Detect flat stock (no decommissioning) for technology I
+                    # e.g. hydropower plants that are never retired
+                    # ------------------------------------------------------------------
+                    if t_retire_abs is None and not np.all(reported_from_2015 == 0):
+                        # Check if reported stock never changes throughout the modeling horizon
+                        if np.all(reported_from_2015 == reported_from_2015[0]):
+                            flat_stock = True
+                            Mylog.info(f"Flat stock detected (no decommissioning) in region {Sector_ind_regions[r]} "
+                                    f"for technology {Sector_ind_list[I]}. SF will be set to 1 to preserve stock exactly.")
+                        else:
+                            flat_stock = False
+                    else:
+                        flat_stock = False
+
+                    # ------------------------------------------------------------------
+                    # 4a) INFLOW-DRIVEN PART
+                    # ------------------------------------------------------------------
+                    sf_to_use = sf.copy()
+
+                    if t_retire_abs is not None:
+                        for c in range(SwitchTime, Nc):  # only inflow cohorts (born after 2015)
+                            if t_retire_abs <= c:
+                                sf_to_use[:, c] = 0.0
+                            else:
+                                retire_rel_to_birth = t_retire_abs - c
+                                n_total = Nc - c
+                                ramp = np.zeros(n_total)
+                                ramp[:retire_rel_to_birth] = np.linspace(1.0, 0.0, retire_rel_to_birth, endpoint=False)
+                                sf_to_use[c:, c] *= ramp
+
+                    elif flat_stock:
+                        # Set SF to 1.0 for all inflow cohorts — no units ever leave the stock
+                        for c in range(SwitchTime, Nc):
+                            sf_to_use[c:, c] = 1.0
+
+                    RECC_dsm_ind = dsm.DynamicStockModel(time_dsm, i=inflow_ESM[r, mS, mR, I, :].copy(), lt=lt)
+                    RECC_dsm_ind.sf = sf_to_use  # uses adjusted sf if early retirement, otherwise identical to sf
 
                     RECC_dsm_ind_s_c[r, mS, mR, I, :, :]     = RECC_dsm_ind.compute_s_c_inflow_driven()
                     RECC_dsm_ind_s_c_o_c[r, mS, mR, I, :, :] = RECC_dsm_ind.compute_o_c_from_s_c()
                     RECC_dsm_ind_o[r, mS, mR, I, :]           = RECC_dsm_ind.compute_outflow_total()
 
-                    # Slice to modeling horizon (SwitchTime onward = 2016 onward, index 116)
-                    new_s_c   = RECC_dsm_ind_s_c[r, mS, mR, I, SwitchTime-1:, :]     # (Nt, Nc)
-                    new_o_c   = RECC_dsm_ind_s_c_o_c[r, mS, mR, I, SwitchTime-1:, :] # (Nt, Nc)
+                    # Slice to modeling horizon
+                    new_s_c = RECC_dsm_ind_s_c[r, mS, mR, I, SwitchTime-1:, :]
+                    new_o_c = RECC_dsm_ind_s_c_o_c[r, mS, mR, I, SwitchTime-1:, :]
 
                     # ------------------------------------------------------------------
                     # 4b) HISTORIC COHORT PART (stock that existed before SwitchTime)
                     #
                     #     For each cohort c < SwitchTime, we know the stock size in 2015
-                    #     (index SwitchTime-2, i.e. the year before modeling starts).
+                    #     (index SwitchTime-1).
                     #     We project it forward using conditional survival:
                     #
-                    #         S(t, c) = S_2015(c) * SF[t, c] / SF[SwitchTime-2, c]
+                    #         S(t, c) = S_2015(c) * SF[t, c] / SF[SwitchTime-1, c]
                     #
-                    #     The conditioning on SF[SwitchTime-2, c] accounts for the fact
+                    #     The conditioning on SF[SwitchTime-1, c] accounts for the fact
                     #     that these units have already survived to 2015; we only want
                     #     the forward-looking depletion from 2015 onward.
                     #
-                    #     Note: SwitchTime=116 (1-based) corresponds to 2016
-                    #           => 2015 is at 0-based index SwitchTime-1 = 115
+                    #     Note: SwitchTime=116 corresponds to 2016 -> 2015 index: SwitchTime-1 = 115
                     # ------------------------------------------------------------------
-
-                    # Index of 2015 in the full timeline (0-based)
-                    idx_2015 = SwitchTime - 1  # = 115
 
                     # Historic stock-by-cohort over the full timeline, shape (Nc, Nc) => (time, cohort)
                     hist_s_c_full = np.zeros((Nc, Nc))
                     hist_o_c_full = np.zeros((Nc, Nc))
 
-                    for c in range(SwitchTime):  # cohorts 0 .. SwitchTime-2 = 0..114 (pre-2015)
+                    for c in range(SwitchTime):  # cohorts 1900-2015
                         sf_at_2015 = sf[idx_2015, c]
 
                         if sf_at_2015 <= 0:
-                            # Cohort fully depleted by 2015 — nothing to carry forward
                             continue
 
-                        stock_2015_c = stock_ESM_2015[r, mS, mR, I, c]  # scalar
+                        stock_2015_c = stock_ESM_2015[r, mS, mR, I, c]
 
                         if stock_2015_c <= 0:
                             continue
 
-                        # Conditional survival from 2015 onward
-                        # sf[t, c] / sf[idx_2015, c] gives probability of surviving to t given survival to 2015
-                        hist_s_c_full[idx_2015:, c] = stock_2015_c * (
-                            sf[idx_2015:, c] / sf_at_2015
-                        )
+                        cond_sf = sf[idx_2015:, c] / sf_at_2015
 
-                    # Outflows = year-on-year decrease in each cohort's stock
-                    # diff along time axis; pad first row with zeros (no outflow in 2015 itself)
-                    hist_o_c_full[1:, :] = np.maximum(
-                        -np.diff(hist_s_c_full, axis=0), 0
-                    )
+                        if t_retire_abs is not None:
+                            retire_rel = t_retire_abs - idx_2015
+                            ramp = np.zeros(len(cond_sf))
+                            ramp[:retire_rel] = np.linspace(1.0, 0.0, retire_rel, endpoint=False)
+                            cond_sf = cond_sf * ramp
 
-                    # Slice to modeling horizon
+                        elif flat_stock:
+                            # Override conditional SF to 1.0 — historic stock never declines
+                            cond_sf = np.ones(len(cond_sf))
+
+                        hist_s_c_full[idx_2015:, c] = stock_2015_c * cond_sf
+
+                    hist_o_c_full[1:, :] = np.maximum(-np.diff(hist_s_c_full, axis=0), 0)
+
                     hist_s_c = hist_s_c_full[SwitchTime-1:, :]  # (Nt, Nc)
                     hist_o_c = hist_o_c_full[SwitchTime-1:, :]  # (Nt, Nc)
 
@@ -4242,7 +4283,7 @@ newrowoffset = msf.xlsxExportAdd_tAB(ws2,Impacts_EnergyRecoveryWasteWood[GWP100_
 # Primary and secondary material production, if not included above already
 newrowoffset = msf.xlsxExportAdd_tAB(ws2,PrimaryProduction[:,0,:,:], newrowoffset,len(ColLabels),'Primary construction grade steel production','Mt/yr',ScriptConfig['RegionalScope'],'F_3_4 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
 newrowoffset = msf.xlsxExportAdd_tAB(ws2,PrimaryProduction[:,1,:,:], newrowoffset,len(ColLabels),'Primary automotive steel production','Mt/yr',ScriptConfig['RegionalScope'],'F_3_4 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
-newrowoffset = msf.xlsxExportAdd_tAB(ws2,PrimaryProduction[:,2,:,:], newrowoffset,len(ColLabels),'Primary stainless production','Mt/yr',ScriptConfig['RegionalScope'],'F_3_4 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
+newrowoffset = msf.xlsxExportAdd_tAB(ws2,PrimaryProduction[:,2,:,:], newrowoffset,len(ColLabels),'Primary stainless steel production','Mt/yr',ScriptConfig['RegionalScope'],'F_3_4 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
 newrowoffset = msf.xlsxExportAdd_tAB(ws2,PrimaryProduction[:,3,:,:], newrowoffset,len(ColLabels),'Primary cast iron production','Mt/yr',ScriptConfig['RegionalScope'],'F_3_4 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
 newrowoffset = msf.xlsxExportAdd_tAB(ws2,PrimaryProduction[:,4,:,:], newrowoffset,len(ColLabels),'Primary wrought Al production','Mt/yr',ScriptConfig['RegionalScope'],'F_3_4 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
 newrowoffset = msf.xlsxExportAdd_tAB(ws2,PrimaryProduction[:,5,:,:], newrowoffset,len(ColLabels),'Primary cast Al production','Mt/yr',ScriptConfig['RegionalScope'],'F_3_4 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
@@ -4816,6 +4857,7 @@ for mm in range(0,Nm):
 
 #if 'pav' in SectorList:  # 2026-01-22, hmli, circomod: aggregate materials group and use passenger vehicles for testing without affecting the results of building sector #20260216 not sector specific
 newrowoffset = msf.xlsxExportAdd_tAB(ws2,np.einsum('tmSR->tSR',DivertedScrap_to_Manuf[:,[0,1,2,3],:,:]),newrowoffset,len(ColLabels),'Diverted fabrication scrap to manufacturing, iron and steel (4 groups)', 'Mt/yr',ScriptConfig['RegionalScope'], 'F_12_5 (part)', 'Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
+newrowoffset = msf.xlsxExportAdd_tAB(ws2,np.einsum('tmSR->tSR',DivertedScrap_to_Manuf[:,[4,5],:,:]),newrowoffset,len(ColLabels),'Diverted fabrication scrap to manufacturing, aluminium (2 groups)', 'Mt/yr',ScriptConfig['RegionalScope'], 'F_12_5 (part)', 'Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
 newrowoffset = msf.xlsxExportAdd_tAB(ws2,np.einsum('tmSR->tSR',DivertedScrap_to_Manuf[:,[4,5],:,:]),newrowoffset,len(ColLabels),'Diverted fabrication scrap to manufacturing, aluminium (2 groups)', 'Mt/yr',ScriptConfig['RegionalScope'], 'F_12_5 (part)', 'Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
 newrowoffset = msf.xlsxExportAdd_tAB(ws2,np.einsum('tmSR->tSR',DivertedScrap_final_cons[:,[0,1,2,3],:,:]),newrowoffset,len(ColLabels),'Diverted fabrication scrap in final material consumption, iron and steel (4 groups)', 'Mt/yr',ScriptConfig['RegionalScope'], 'F_6_7 (part)', 'Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
 newrowoffset = msf.xlsxExportAdd_tAB(ws2,np.einsum('tmSR->tSR',DivertedScrap_final_cons[:,[4,5],:,:]),newrowoffset,len(ColLabels),'Diverted fabrication scrap in final material consumption, aluminium (2 groups)', 'Mt/yr',ScriptConfig['RegionalScope'], 'F_6_7 (part)', 'Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
