@@ -2287,9 +2287,9 @@ for mS in range(2,NS): #SSP2 only
                     np.fill_diagonal(sf, 1)
                     SF_Array[:, :, I, r] = sf
 
-            # ========================================================================================================
-            # 4) Build and run the integrated model for each technology, region, scenario and handle early retirements
-            # ========================================================================================================
+            # =========================================================================================================================
+            # 4) Build and run the integrated model for each technology, region, scenario + handle early retirements and no retirements
+            # =========================================================================================================================
 
             for I in tqdm(range(NI), unit=' EGT types'):
                 for r in range(Nr):
@@ -2384,12 +2384,12 @@ for mS in range(2,NS): #SSP2 only
                         sf_at_2015 = sf[idx_2015, c]
 
                         if sf_at_2015 <= 0:
-                            continue
+                            continue #jumps to the next c, so ensures that no division by zero takes place
 
                         stock_2015_c = stock_ESM_2015[r, mS, mR, I, c]
 
                         if stock_2015_c <= 0:
-                            continue
+                            continue #jumps to the next c, as hist_s_c_full calculation is already zero
 
                         cond_sf = sf[idx_2015:, c] / sf_at_2015
 
