@@ -558,6 +558,7 @@ except:
         Sector_tis_rge = []
     
 Materials_loc = IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items
+Elements_loc = IndexTable.Classification[IndexTable.index.get_loc('Element')].Items
 Cement_loc    = IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items.index('cement')
 Concrete_loc  = IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items.index('concrete')
 ConcrAgg_loc  = IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items.index('concrete aggregates')
@@ -2258,6 +2259,7 @@ for mS in range(2,NS): #SSP2 only
             stock_ESM_2023_raw = reported_stock[:,:,:,:,8] #shape rSRI, now selected for reference year 2023
             lifetimes = np.einsum('r,Ic->Irc',np.ones((Nr)),RECC_System.ParameterDict['3_LT_RECC_ProductLifetime_industry'].Values)
             
+            t_2023 = 8 #get Nt index of year 2023
             #assign age_cohort dimension to 2023 stock
             stock_ESM_2023 = np.einsum("rSRI,rIc -> rSRIc", stock_ESM_2023_raw, stock_age_cohort_distribution)
 
@@ -2268,6 +2270,8 @@ for mS in range(2,NS): #SSP2 only
             RECC_dsm_ind_s_c        = np.zeros((Nr,NS,NR,NI,Nc,Nc))
             RECC_dsm_ind_s_c_o_c    = np.zeros((Nr,NS,NR,NI,Nc,Nc))
             RECC_dsm_ind_o          = np.zeros((Nr,NS,NR,NI,Nc))
+            inflow_2016_2023        = np.zeros((t_2023,NI,Nr)) 
+            stock_2016_2023         = np.zeros((t_2023,NI,Nr))
             
             # =============================================================================
             # 3) Pre-compute survival functions for all technologies and regions
@@ -2292,8 +2296,6 @@ for mS in range(2,NS): #SSP2 only
             # =========================================================================================================================
             # 4) Build and run the integrated model for each technology, region, scenario + handle early retirements and no retirements
             # =========================================================================================================================
-
-            t_2023 = 8          # index into Nt=46 arrays (reported_stock, etc.), 2023 - 2015 = 8
 
             for I in tqdm(range(NI), unit=' EGT types'):
                 for r in range(Nr):
@@ -2434,14 +2436,32 @@ for mS in range(2,NS): #SSP2 only
                     Stock_Detail_UsePhase_I[t_2023:, :, I, r]   = new_s_c + hist_s_c
                     Outflow_Detail_UsePhase_I[t_2023:, :, I, r] = new_o_c + hist_o_c
 
-                    # No outflow in the first year (handover year) by convention
-                    Outflow_Detail_UsePhase_I[t_2023, :, I, r] = 0
+                    # No outflow in the first years (handover year) by convention
+                    Outflow_Detail_UsePhase_I[0:t_2023, :, I, r] = 0
 
                     # Inflows: only from ESM (historic cohorts don't generate new inflows)
                     # inflow_ESM is Nc-based -> use idx_2023
                     Inflow_Detail_UsePhase_I[t_2023:, I, r] = inflow_ESM[r, mS, mR, I, idx_2023:]
-                    Inflow_Detail_UsePhase_I[t_2023, I, r] = Stock_Detail_UsePhase_I[t_2023, :, I, r].sum() #assign corresponding inflow to 2023 stock 
-                    #Inflow_Detail_UsePhase_I[t_2023, I, r] = 0  # no inflow in first modeling year
+ 
+            stock_2023_pre_adjustment = Stock_Detail_UsePhase_I[t_2023,:,:,:].copy()
+
+            #assign historic inflows (2016-2023) from age_cohort composition of ESM stock
+            hist_inflow_I = Stock_Detail_UsePhase_I[t_2023,:,:,:].copy() # Snapshot before loop modifies Stock_Detail_UsePhase_I for years 2015-2023
+            for t in range(t_2023):  # 2015-2022 only
+                if t == 0:
+                    Inflow_Detail_UsePhase_I[t,:,:] = 0
+                else:
+                    Inflow_Detail_UsePhase_I[t,:,:] = hist_inflow_I[SwitchTime-1+t,:,:]
+                Stock_Detail_UsePhase_I[t,:,:,:] = 0
+                Stock_Detail_UsePhase_I[t,:SwitchTime+t,:,:] = hist_inflow_I[:SwitchTime+t,:,:]
+
+            # Explicitly assign 2023 stock and inflow
+            Stock_Detail_UsePhase_I[t_2023,:,:,:] = stock_2023_pre_adjustment  # restore from 4c)
+            Inflow_Detail_UsePhase_I[t_2023,:,:] = hist_inflow_I[SwitchTime-1+t_2023,:,:]
+            
+            #check if Stock_Detail_UsePhase_I pre and post adjustment are the equal for the year 2023
+            stock_check = stock_2023_pre_adjustment - Stock_Detail_UsePhase_I[t_2023,:,:,:] #should be zero
+            assert np.allclose(stock_check, 0, atol=1e-6, rtol=1e-5), f"Stock mismatch at t_2023: max deviation = {np.abs(stock_check).max()}"
 
             # divergence: reported_stock is Nt-based -> use t_2023
             divergence = np.einsum("rIt -> tIr", reported_stock[:, mS, mR, :, :]) - Stock_Detail_UsePhase_I[:, :, :, :].sum(axis=1)
@@ -2449,9 +2469,13 @@ for mS in range(2,NS): #SSP2 only
             total_modeled  = Stock_Detail_UsePhase_I[35, :, :, :].sum()
             relative_div   = abs(divergence[35].sum()) / total_reported * 100
 
-            Mylog.info(f"Total reported stock from ESM in 2050:  {total_reported:.2f}")
-            Mylog.info(f"Total modeled stock in 2050:   {total_modeled:.2f}")
-            Mylog.info(f"Absolute divergence 2050 (reported ESM stock 2050 - modeled stock 2050):   {divergence[35].sum():.2f}")
+            Mylog.info(f"Total reported stock from ESM in 2023: {reported_stock[:,mS,mR,:,t_2023].sum():.2f} GW")
+            Mylog.info(f"Total modeled stock in 2023: {Stock_Detail_UsePhase_I[t_2023,:,:,:].sum():.2f} GW")
+            Mylog.info(f"Absolute divergence 2023 (reported ESM stock 2023 - modeled stock 2023):   {(reported_stock[:,mS,mR,:,t_2023].sum()-Stock_Detail_UsePhase_I[t_2023,:,:,:].sum()):.2f} GW")
+            Mylog.info(f"Relative divergence 2023:   {((reported_stock[:,mS,mR,:,t_2023].sum()-Stock_Detail_UsePhase_I[t_2023,:,:,:].sum())/reported_stock[:,mS,mR,:,t_2023].sum()*100):.2f}%")
+            Mylog.info(f"Total reported stock from ESM in 2050:  {total_reported:.2f} GW")
+            Mylog.info(f"Total modeled stock in 2050:   {total_modeled:.2f} GW")
+            Mylog.info(f"Absolute divergence 2050 (reported ESM stock 2050 - modeled stock 2050):   {divergence[35].sum():.2f} GW")
             Mylog.info(f"Relative divergence 2050:   {relative_div:.2f}%")
 
 
@@ -2601,7 +2625,7 @@ for mS in range(2,NS): #SSP2 only
             Par_RECC_MC_Nr[:,:,Sector_nrb_rge,:,mS,mR,:]      = np.einsum('mNrct->Ncmrt',RECC_System.ParameterDict['3_MC_RECC_NonResBuildings_t'].Values[:,:,:,:,:,mS,mR])
         '''Par_RECC_MC_Nl = np.zeros((Nc,Nm,NL,Nl,NS))          # for electricity generation technologies in kt/GW'''
         if 'ind' in SectorList:
-            Par_RECC_MC_Nr[:,:,Sector_ind_rge,:,mS,mR,:]        = np.einsum('rct,Imt->Icmrt',np.ones((Nr,Nc,Nt)), RECC_System.ParameterDict['3_MC_RECC_industry'].Values[:,:,:])
+            Par_RECC_MC_Nr[:,:,Sector_ind_rge,:,mS,mR,:]        = np.einsum('rt,Imc->Icmrt',np.ones((Nr,Nt)), RECC_System.ParameterDict['3_MC_RECC_industry'].Values[:,:,:])
             '''Par_RECC_MC_Nl[:,:,Sector_ind_rge_reg,:,mS]        = np.einsum('lc,Im->Icml',np.ones((Nl,Nc)), RECC_System.ParameterDict['3_MC_RECC_industry'].Values[:,:])       # TODO 2025-14-11 mg: delete Par_RECC_MC_Nl if not further used?'''
         Par_RECC_MC_No = np.zeros((Nc,Nm,NO,No,NS))          # for appliances in g/unit, nonres. buildings in kg/m²
         if 'app' in SectorList:
@@ -2735,42 +2759,19 @@ for mS in range(2,NS): #SSP2 only
             # Stock elemental composition, historic for each element and for future years: 'all' elements only
             RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,:] = \
             np.einsum('tcrIme,tcIr->tcrIme',Par_3_MC_Stock_ByElement_Nr[:,:,:,Sector_ind_rge,:,:],Stock_Detail_UsePhase_I)/1000   # Indices='t,c,r,I,m,e' # division by /1000 to reach desried reporting of Mt
-            check1_S_7 = RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,:]
-            Mylog.info(f" RECC_System.StockDict['S_7'].Values[8,SwitchTime+8-1,1,3,:,0]: {RECC_System.StockDict['S_7'].Values[8,SwitchTime+8-1,1,3,:,0]*1000}")
-            Mylog.info(f"Par_3_MC_Stock_ByElement_Nr[8,SwitchTime+8-1,1,3,:,0]: {Par_3_MC_Stock_ByElement_Nr[8,SwitchTime+8-1,1,3,:,0]}")
-            Mylog.info(f"Stock_Detail_UsePhase_I[8,SwitchTime+8-1,3,1]{Stock_Detail_UsePhase_I[8,SwitchTime+8-1,3,1]}")
-            Mylog.info(f"Test: selected tech: {Sector_ind_list[3]}, selected region: {Sector_ind_regions[1]}, selected year: {2015+8}, cohort: {1900+SwitchTime+8-1}\
-                       , material: {Materials_loc[0]}, stock * 3_MC(m) should be respective value in S7 for material m or stock * 3_MC(m)-S7(m)=0: {(Stock_Detail_UsePhase_I[8,SwitchTime+8-1,3,1]*Par_3_MC_Stock_ByElement_Nr[8,SwitchTime+8-1,1,3,:,0][0])-(RECC_System.StockDict['S_7'].Values[8,SwitchTime+8-1,1,3,:,0]*1000)[0]} must equal 0")
-
+            
             # Outflow, 'all' elements only:
             RECC_System.FlowDict['F_7_8'].Values[:,:,:,Sector_ind_rge,:,0] = \
             np.einsum('Itcrm,tcIr->Itcrm',Par_3_MC_Stock_ByElement_Nr[:,:,:,Sector_ind_rge,:,0],Outflow_Detail_UsePhase_I)/1000 # all elements, Indices='t,c,r,I,m'
             
-            # NOTE: Inflow as mass balance, to account for reuse material inflows to other age-cohorts than the current one (t=c).
-            #RECC_System.FlowDict['F_6_7'].Values[1::,:,Sector_ind_rge,:,0]   = \
-            #np.einsum('Itcrm->Itrm',np.diff(RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,0],1,axis=1)) + np.einsum('Itcrm->Itrm',RECC_System.FlowDict['F_7_8'].Values[1::,:,:,Sector_ind_rge,:,0])   
-            #Check_ind_F_6_7_first = RECC_System.FlowDict['F_6_7'].Values[1::,:,Sector_ind_rge,:,0]            
-
-            #RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,0] = np.einsum('Itrm,tIr -> Itrm',Par_3_MC_Stock_ByElement_Nr[:,SwitchTime-1,:,Sector_ind_rge,:,0], Inflow_Detail_UsePhase_I[:,:,:])/1000
+            # Inflow as mass balance, to account for reuse material inflows to other age-cohorts than the current one (t=c).
+            RECC_System.FlowDict['F_6_7'].Values[1::,:,Sector_ind_rge,:,0]   = \
+            np.einsum('Itcrm->Itrm',np.diff(RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,0],1,axis=1)) + np.einsum('Itcrm->Itrm',RECC_System.FlowDict['F_7_8'].Values[1::,:,:,Sector_ind_rge,:,0])   
             
             # inflow of materials in new products, for checking:
             for mmt in range(0,Nt):
                 F_6_7_new[mmt,:,Sector_ind_rge,:,0] = np.einsum('Ir,Irm->Irm',Inflow_Detail_UsePhase_I[mmt,:,:],Par_3_MC_Stock_ByElement_Nr[mmt,SwitchTime+mmt-1,:,Sector_ind_rge,:,0])/1000
-                RECC_System.FlowDict['F_6_7'].Values[mmt,:,Sector_ind_rge,:,0] = F_6_7_new[mmt,:,Sector_ind_rge,:,0]
-                if mmt == 8:
-                    Mylog.info(f"F_6_7_new[mmt,:,3,:,0].shape: {F_6_7_new[mmt,1,3,:,0].shape}")
-                    Mylog.info(f"F_6_7_new[mmt,1,3,:,0] for {Materials_loc[0]}: {F_6_7_new[mmt,1,3,0,0]}")
-                    Mylog.info(f"RECC_System.FlowDict['F_6_7'].Values[mmt,:,Sector_ind_rge,:,0] for {Materials_loc[0]}:: {RECC_System.FlowDict['F_6_7'].Values[mmt,1,3,0,0]}")
-                    Mylog.info(f"mmt value: {mmt} Inflow_Detail_UsePhase_I[{mmt},3,1]: {Inflow_Detail_UsePhase_I[mmt,3,1]}")
-                    Mylog.info(f"Par_3_MC_Stock_ByElement_Nr[{mmt},SwitchTime+{mmt}-1,1,3,:,0] {Par_3_MC_Stock_ByElement_Nr[mmt,SwitchTime+mmt-1,1,3,:,0]}")
-                    Mylog.info(f"Test: selected tech: {Sector_ind_list[3]}, selected region: {Sector_ind_regions[1]}, selected year: {2015+mmt}, cohort: {1900+SwitchTime+mmt-1}\
-                       , material: {Materials_loc[0]}, inflow * 3_MC(m) should be respective value in F_6_7 for material m, or inflow * 3_MC(m)-F_6_7(m)=0: {(Inflow_Detail_UsePhase_I[mmt,3,1]*Par_3_MC_Stock_ByElement_Nr[mmt,SwitchTime+mmt-1,1,3,:,0][0])-(F_6_7_new[mmt,1,3,:,0]*1000)[0]} must equal 0")
-
-            Mylog.info(f" F_6_7_new[mmt,:,Sector_ind_rge,:,0]: {F_6_7_new[:,:,Sector_ind_rge,:,0].sum()}")
-            Mylog.info(f" RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,0]: {RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,0].sum()}")
-            Check_ind = (RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,0] - F_6_7_new[:,:,Sector_ind_rge,:,0]).sum() # must be 0.s
-            check1_F_6_7 = RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,0]
-
+                
         if 'tis' in SectorList:
             # convert product stocks and flows to material stocks and flows, only for chemical element position 'all':
             # Stock elemental composition, historic for each element and for future years: 'all' elements only
@@ -3278,26 +3279,6 @@ for mS in range(2,NS): #SSP2 only
                 RECC_System.StockDict['S_7'].Values[t,0:CohortOffset+1,:,Sector_ind_rge,:,:] = \
                 np.einsum('Icrme,cIr->Icrme',Par_3_MC_Stock_ByElement_Nr[t,0:CohortOffset+1,:,Sector_ind_rge,:,:],Stock_Detail_UsePhase_I[t,0:CohortOffset+1,:,:])/1000 # All elements.
 
-                if t == 8:
-                    Mylog.info(f"Selected tech: {Sector_ind_list[3]}, selected region: {Sector_ind_regions[1]}, selected year: {2015+t}, CohortOffset: {CohortOffset}, material: {Materials_loc[0]}, t value: {t}")
-                    
-                    Mylog.info(f"F_6_7")
-                    Mylog.info(f"RECC_System.FlowDict['F_6_7'].Values[t,1,3,:,0].shape: {RECC_System.FlowDict['F_6_7'].Values[t,1,3,:,0].shape}")
-                    Mylog.info(f"Inflow_Detail_UsePhase_I[t,3,1]: {Inflow_Detail_UsePhase_I[t,3,1]}")
-                    Mylog.info(f"Par_3_MC_Stock_ByElement_Nr[t,CohortOffset,1,3,0,0]: {Par_3_MC_Stock_ByElement_Nr[t,CohortOffset,1,3,0,0]}")
-                    Mylog.info(f"Test: inflow * 3_MC(m) should be respective value in F_6_7 for material m, or inflow * 3_MC(m)-F_6_7(m)=0: {(Inflow_Detail_UsePhase_I[t,3,1]*Par_3_MC_Stock_ByElement_Nr[t,CohortOffset,1,3,0,0])-(RECC_System.FlowDict['F_6_7'].Values[t,1,3,0,0]*1000)} must equal 0")
-
-                    Mylog.info(f"S_7")
-                    Mylog.info(f"RECC_System.StockDict['S_7'].Values[t,0:CohortOffset+1,1,3,:,0].shape: {RECC_System.StockDict['S_7'].Values[t,0:CohortOffset+1,1,3,:,0].shape}")
-                    Mylog.info(f"Stock_Detail_UsePhase_I[{t},0:{CohortOffset+1},0,0]: {Stock_Detail_UsePhase_I[t,0:CohortOffset+1,0,0]}")
-                    Mylog.info(f"Par_3_MC_Stock_ByElement_Nr[t,0:CohortOffset+1,1,3,0,0]: {Par_3_MC_Stock_ByElement_Nr[t,0:CohortOffset+1,1,3,0,0]}")
-                    Mylog.info(f"Test: stock * 3_MC(m) should be respective value in S_7 for material m, or stock * 3_MC(m)-S_7(m)=0: {(Stock_Detail_UsePhase_I[t,0:CohortOffset+1,0,0]*Par_3_MC_Stock_ByElement_Nr[t,0:CohortOffset+1,1,3,0,0])-(RECC_System.StockDict['S_7'].Values[t,0:CohortOffset+1,1,3,0,0]*1000)} must equal 0")
-
-                if t == Nt-1:
-                    Mylog.info(f"RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,:]: {RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,0].sum()}")
-                    Mylog.info(f" RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,:]: {RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,:].sum()}")
-                    check2_F_6_7 = RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,0]
-                    check2_S_7 = RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,:]
                 '''RECC_System.FlowDict['F_6_7_Nl'].Values[t,:,:,:,:]   = \
                 np.einsum('lIme,Il->lIme',Par_3_MC_Stock_ByElement_Nl[CohortOffset,:,:,:,:],Inflow_Detail_UsePhase_I[t,:,:])/1000 # all elements, Indices='t,l,I,m,e'                '''
             
