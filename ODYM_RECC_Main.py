@@ -557,6 +557,7 @@ except:
     else:
         Sector_tis_rge = []
     
+Materials_loc = IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items
 Cement_loc    = IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items.index('cement')
 Concrete_loc  = IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items.index('concrete')
 ConcrAgg_loc  = IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items.index('concrete aggregates')
@@ -604,7 +605,7 @@ Heating_loc   = IndexTable.Classification[IndexTable.index.get_loc('ServiceType'
 Cooling_loc   = IndexTable.Classification[IndexTable.index.get_loc('ServiceType')].Items.index('Cooling')
 DomstHW_loc   = IndexTable.Classification[IndexTable.index.get_loc('ServiceType')].Items.index('DHW')
 Service_Drivg = IndexTable.Classification[IndexTable.index.get_loc('ServiceType')].Items.index('Driving')
-Bio_El_loc    = IndexTable.Classification[IndexTable.index.get_loc('Industry')].Items.index('Biomass|Other (Not Elsewhere Specified)')
+Bio_El_loc    = IndexTable.Classification[IndexTable.index.get_loc('Industry')].Items.index('Biomass|w/o CCS')
 Bio_El_CS_loc = IndexTable.Classification[IndexTable.index.get_loc('Industry')].Items.index('Biomass|w/ CCS')
 
 Service_Reb   = np.array([Heating_loc,Cooling_loc,DomstHW_loc])
@@ -925,7 +926,7 @@ if ScriptConfig['Include_REStrategy_ReUse'] == 'False':
     if 'nrb' in SectorList:
         ParameterDict['6_PR_ReUse_nonresBld'].Values = np.einsum('mNr,t->mNrt',ParameterDict['6_PR_ReUse_nonresBld'].Values[:,:,:,1],np.ones(Nt)) # stay at current levels, which are > 0. #2025-06-04, ch: make reuse parameter for buildings time dependent to allow for start year reuse share >0
     if 'tis' in SectorList: #2026-01 add tis reuse
-        ParameterDict['6_PR_ReUse_Tis'].Values = np.einsum('mKr,t->mKrt',ParameterDict['6_PR_ReUse_Tis'].Values[:,:,:,1],np.ones(Nt)) # stay at current levels, which are > 0. 
+        ParameterDict['6_PR_ReUse_Tis'].Values = np.einsum('mKr,t->mKrt',ParameterDict['6_PR_ReUse_Tis'].Values[:,:,:,1],np.ones(Nt)) # stay at current levels, which are > 0.
 
 
 
@@ -1404,7 +1405,7 @@ ExitFlags = {} # Exit flags for individual model runs
 # Select and loop over scenarios
 #for mS in range(0,NS):
 for mS in range(2,NS): #SSP2 only
-    for mR in range(0,NR):
+    for mR in range(1,NR):
     #for mR in range(0,1): #Baseline only
 
         SName = IndexTable.loc['Scenario'].Classification.Items[mS]
@@ -2249,15 +2250,16 @@ for mS in range(2,NS): #SSP2 only
             # =============================================================================
             # 1) Import data (stock, age_cohort distribution, inflows from ESM)
             # =============================================================================
-            stock_age_cohort_distribution = ParameterDict['3_SHA_RECC_Industry_AgeCohortDistribution_Stock2015'].Values[:,:,:,0] #shape rIc with only values for selected reference year (as stated in filename)
-            inflow_ESM = RECC_System.ParameterDict['1_F_RECC_FinalProducts_industry'].Values[:,:,:,:,:] #dimensions: rSRIc -> now only select SSP2 and RCP2.6 (rIc)
-            inflow_ESM [:,:,:,:,:SwitchTime] = 0 #set inflow to year 2015 to zero
-            reported_stock = RECC_System.ParameterDict['2_S_RECC_FinalProducts_2015_industry'].Values  
-            stock_ESM_2015_raw = reported_stock[:,:,:,:,0] #shape rSRI, now selected for reference year 2015
-            lifetimes = np.einsum('cr,I->Irc',np.ones((Nc,Nr)),RECC_System.ParameterDict['3_LT_RECC_ProductLifetime_industry'].Values)
+            stock_age_cohort_distribution = ParameterDict['3_SHA_RECC_industry_AgeCohortDistribution'].Values[:,:,:] #shape rIc with only values for selected reference year (as stated in param file) #now 2023 for REMod
+            inflow_ESM = RECC_System.ParameterDict['1_F_RECC_FinalProducts_industry'].Values[:,:,:,:,:].copy() #dimensions: rSRIc 
+            idx_2023 = SwitchTime + 7 #index 123
+            inflow_ESM [:,:,:,:,:idx_2023+1] = 0 #set inflow to year 2023 to zero
+            reported_stock = RECC_System.ParameterDict['2_S_RECC_FinalProducts_industry'].Values  
+            stock_ESM_2023_raw = reported_stock[:,:,:,:,8] #shape rSRI, now selected for reference year 2023
+            lifetimes = np.einsum('r,Ic->Irc',np.ones((Nr)),RECC_System.ParameterDict['3_LT_RECC_ProductLifetime_industry'].Values)
             
-            #assign age_cohort dimension to 2015 stock
-            stock_ESM_2015 = np.einsum("rSRI,rIc -> rSRIc", stock_ESM_2015_raw, stock_age_cohort_distribution)
+            #assign age_cohort dimension to 2023 stock
+            stock_ESM_2023 = np.einsum("rSRI,rIc -> rSRIc", stock_ESM_2023_raw, stock_age_cohort_distribution)
 
             # =============================================================================
             # 2) Create empty containers
@@ -2291,22 +2293,25 @@ for mS in range(2,NS): #SSP2 only
             # 4) Build and run the integrated model for each technology, region, scenario + handle early retirements and no retirements
             # =========================================================================================================================
 
+            t_2023 = 8          # index into Nt=46 arrays (reported_stock, etc.), 2023 - 2015 = 8
+
             for I in tqdm(range(NI), unit=' EGT types'):
                 for r in range(Nr):
 
                     sf = SF_Array[:, :, I, r]  # shape (Nc, Nc)
-                    idx_2015 = SwitchTime - 1  # = 115
 
                     # ------------------------------------------------------------------
                     # Detect early retirement year for technology I
                     # Must be done before 4a) and 4b) as both parts need t_retire_abs
+                    # NOTE: reported_stock has Nt=46 time dimension -> use t_2023
+                    # t_retire_abs is always expressed in Nc=161 index space
                     # ------------------------------------------------------------------
-                    reported_from_2015 = reported_stock[r, mS, mR, I, :]
-                    zero_mask = reported_from_2015 == 0
+                    reported_from_2023 = reported_stock[r, mS, mR, I, t_2023:]  # slice from 2023 onward, Nt-based
+                    zero_mask = reported_from_2023 <= 0.00001
                     if zero_mask.any():
-                        first_zero_rel = np.argmax(zero_mask) 
-                        if first_zero_rel > 0 and np.all(zero_mask[first_zero_rel:]): #checks whether the first zero in the array occurs after index 0. If the very first entry is already zero, it means the technology either never existed in this region/scenario, or only appears later — neither of which is an early retirement
-                            t_retire_abs = idx_2015 + first_zero_rel
+                        first_zero_rel = np.argmax(zero_mask)
+                        if first_zero_rel > 0 and np.all(zero_mask[first_zero_rel:]):  # checks whether the first zero occurs after index 0
+                            t_retire_abs = idx_2023 + first_zero_rel  # expressed in Nc=161 index space
                             Mylog.info(f"Early retirement detected in region {Sector_ind_regions[r]} for technology {Sector_ind_list[I]}. Survival function was scaled accordingly to meet early retirement path.")
                         else:
                             t_retire_abs = None
@@ -2316,25 +2321,43 @@ for mS in range(2,NS): #SSP2 only
                     # ------------------------------------------------------------------
                     # Detect flat stock (no decommissioning) for technology I
                     # e.g. hydropower plants that are never retired
+                    # A stock is considered flat if it never declines or increases by more than
+                    # flat_stock_tol (e.g. 1%) relative to the 2023 value.
+                    # This handles minor numerical noise in the input data while correctly
+                    # excluding growing technologies (e.g. Solar PV) and retiring technologies.
                     # ------------------------------------------------------------------
-                    if t_retire_abs is None and not np.all(reported_from_2015 == 0):
-                        # Check if reported stock never changes throughout the modeling horizon
-                        if np.all(reported_from_2015 == reported_from_2015[0]):
-                            flat_stock = True
-                            Mylog.info(f"Flat stock detected (no decommissioning) in region {Sector_ind_regions[r]} "
-                                    f"for technology {Sector_ind_list[I]}. SF will be set to 1 to preserve stock exactly.")
-                        else:
+                    flat_stock_tol = 0.015  # 1.5% tolerance for numerical noise in input data
+
+                    if t_retire_abs is None and not np.all(reported_from_2023 == 0):  # only check if technology exists and no early retirement detected
+                        stock_2023_val = reported_from_2023[0]  # stock value at handover year 2023
+                        if stock_2023_val <= 0:
+                            # technology not yet built in 2023 but appears later -> not flat stock
                             flat_stock = False
+                        else:
+                            # largest relative drop from 2023 level over entire modeling horizon
+                            max_decline_rel = (stock_2023_val - reported_from_2023.min()) / stock_2023_val
+                            # largest relative increase from 2023 level over entire modeling horizon
+                            max_increase_rel = (reported_from_2023.max() - stock_2023_val) / stock_2023_val
+
+                            if max_decline_rel <= flat_stock_tol and max_increase_rel <= flat_stock_tol:  # stock stays within noise band -> treat as flat
+                                flat_stock = True
+                                Mylog.info(f"Flat stock detected (no decommissioning) in region {Sector_ind_regions[r]} "
+                                        f"for technology {Sector_ind_list[I]} "
+                                        f"(max relative decline: {max_decline_rel:.4%}, max relative increase: {max_increase_rel:.4%}). "
+                                        f"SF will be set to 1 to preserve stock exactly.")
+                            else:
+                                flat_stock = False  # genuine decommissioning or growth detected
                     else:
-                        flat_stock = False
+                        flat_stock = False  # technology absent or early retirement already flagged
 
                     # ------------------------------------------------------------------
                     # 4a) INFLOW-DRIVEN PART
+                    # NOTE: inflow_ESM has Nc=161 time dimension -> use idx_2023
                     # ------------------------------------------------------------------
                     sf_to_use = sf.copy()
 
                     if t_retire_abs is not None:
-                        for c in range(SwitchTime, Nc):  # only inflow cohorts (born after 2015)
+                        for c in range(idx_2023 + 1, Nc):  # only inflow cohorts (born after 2023), Nc-based
                             if t_retire_abs <= c:
                                 sf_to_use[:, c] = 0.0
                             else:
@@ -2345,94 +2368,98 @@ for mS in range(2,NS): #SSP2 only
                                 sf_to_use[c:, c] *= ramp
 
                     elif flat_stock:
-                        # Set SF to 1.0 for all inflow cohorts — no units ever leave the stock
-                        for c in range(SwitchTime, Nc):
+                        for c in range(idx_2023 + 1, Nc):  # Nc-based
                             sf_to_use[c:, c] = 1.0
 
                     RECC_dsm_ind = dsm.DynamicStockModel(time_dsm, i=inflow_ESM[r, mS, mR, I, :].copy(), lt=lt)
-                    RECC_dsm_ind.sf = sf_to_use  # uses adjusted sf if early retirement, otherwise identical to sf
+                    RECC_dsm_ind.sf = sf_to_use
 
                     RECC_dsm_ind_s_c[r, mS, mR, I, :, :]     = RECC_dsm_ind.compute_s_c_inflow_driven()
                     RECC_dsm_ind_s_c_o_c[r, mS, mR, I, :, :] = RECC_dsm_ind.compute_o_c_from_s_c()
                     RECC_dsm_ind_o[r, mS, mR, I, :]           = RECC_dsm_ind.compute_outflow_total()
 
-                    # Slice to modeling horizon
-                    new_s_c = RECC_dsm_ind_s_c[r, mS, mR, I, SwitchTime-1:, :]
-                    new_o_c = RECC_dsm_ind_s_c_o_c[r, mS, mR, I, SwitchTime-1:, :]
+                    # Slice to modeling horizon (from 2023 onward), Nc-based
+                    new_s_c = RECC_dsm_ind_s_c[r, mS, mR, I, idx_2023:, :]
+                    new_o_c = RECC_dsm_ind_s_c_o_c[r, mS, mR, I, idx_2023:, :]
 
                     # ------------------------------------------------------------------
-                    # 4b) HISTORIC COHORT PART (stock that existed before SwitchTime)
+                    # 4b) HISTORIC COHORT PART (stock that existed before 2023)
                     #
-                    #     For each cohort c < SwitchTime, we know the stock size in 2015
-                    #     (index SwitchTime-1).
+                    #     For each cohort c <= idx_2023, we know the stock size in 2023.
                     #     We project it forward using conditional survival:
                     #
-                    #         S(t, c) = S_2015(c) * SF[t, c] / SF[SwitchTime-1, c]
+                    #         S(t, c) = S_2023(c) * SF[t, c] / SF[idx_2023, c]
                     #
-                    #     The conditioning on SF[SwitchTime-1, c] accounts for the fact
-                    #     that these units have already survived to 2015; we only want
-                    #     the forward-looking depletion from 2015 onward.
-                    #
-                    #     Note: SwitchTime=116 corresponds to 2016 -> 2015 index: SwitchTime-1 = 115
+                    #     SF arrays are Nc=161 based -> use idx_2023
+                    #     stock_ESM_2023 was built from reported_stock[:,:,:,:,t_2023]
+                    #     so its cohort dimension c is Nc=161 based
                     # ------------------------------------------------------------------
 
-                    # Historic stock-by-cohort over the full timeline, shape (Nc, Nc) => (time, cohort)
                     hist_s_c_full = np.zeros((Nc, Nc))
                     hist_o_c_full = np.zeros((Nc, Nc))
 
-                    for c in range(SwitchTime):  # cohorts 1900-2015
-                        sf_at_2015 = sf[idx_2015, c]
+                    for c in range(idx_2023 + 1):  # cohorts 1900-2023, Nc-based
+                        sf_at_2023 = sf[idx_2023, c]
 
-                        if sf_at_2015 <= 0:
-                            continue #jumps to the next c, so ensures that no division by zero takes place
+                        if sf_at_2023 <= 0:
+                            continue
 
-                        stock_2015_c = stock_ESM_2015[r, mS, mR, I, c]
+                        stock_2023_c = stock_ESM_2023[r, mS, mR, I, c]
 
-                        if stock_2015_c <= 0:
-                            continue #jumps to the next c, as hist_s_c_full calculation is already zero
+                        if stock_2023_c <= 0:
+                            continue
 
-                        cond_sf = sf[idx_2015:, c] / sf_at_2015
+                        cond_sf = sf[idx_2023:, c] / sf_at_2023  # Nc-based slice
 
                         if t_retire_abs is not None:
-                            retire_rel = t_retire_abs - idx_2015
+                            retire_rel = t_retire_abs - idx_2023  # both Nc-based
                             ramp = np.zeros(len(cond_sf))
                             ramp[:retire_rel] = np.linspace(1.0, 0.0, retire_rel, endpoint=False)
                             cond_sf = cond_sf * ramp
 
                         elif flat_stock:
-                            # Override conditional SF to 1.0 — historic stock never declines
                             cond_sf = np.ones(len(cond_sf))
 
-                        hist_s_c_full[idx_2015:, c] = stock_2015_c * cond_sf
+                        hist_s_c_full[idx_2023:, c] = stock_2023_c * cond_sf  # Nc-based
 
                     hist_o_c_full[1:, :] = np.maximum(-np.diff(hist_s_c_full, axis=0), 0)
 
-                    hist_s_c = hist_s_c_full[SwitchTime-1:, :]  # (Nt, Nc)
-                    hist_o_c = hist_o_c_full[SwitchTime-1:, :]  # (Nt, Nc)
+                    hist_s_c = hist_s_c_full[idx_2023:, :]  # (Nt, Nc), Nc-based slice
+                    hist_o_c = hist_o_c_full[idx_2023:, :]  # (Nt, Nc), Nc-based slice
 
                     # ------------------------------------------------------------------
                     # 4c) COMBINE both parts and store
                     # ------------------------------------------------------------------
 
-                    Stock_Detail_UsePhase_I[:, :, I, r]   = new_s_c   + hist_s_c
-                    Outflow_Detail_UsePhase_I[:, :, I, r] = new_o_c   + hist_o_c
+                    Stock_Detail_UsePhase_I[t_2023:, :, I, r]   = new_s_c + hist_s_c
+                    Outflow_Detail_UsePhase_I[t_2023:, :, I, r] = new_o_c + hist_o_c
 
                     # No outflow in the first year (handover year) by convention
-                    Outflow_Detail_UsePhase_I[0, :, I, r] = 0
+                    Outflow_Detail_UsePhase_I[t_2023, :, I, r] = 0
 
                     # Inflows: only from ESM (historic cohorts don't generate new inflows)
-                    Inflow_Detail_UsePhase_I[:, I, r]    = inflow_ESM[r, mS, mR, I, SwitchTime-1:]
-                    Inflow_Detail_UsePhase_I[0, I, r]    = 0  # no inflow in first modeling year
+                    # inflow_ESM is Nc-based -> use idx_2023
+                    Inflow_Detail_UsePhase_I[t_2023:, I, r] = inflow_ESM[r, mS, mR, I, idx_2023:]
+                    Inflow_Detail_UsePhase_I[t_2023, I, r] = Stock_Detail_UsePhase_I[t_2023, :, I, r].sum() #assign corresponding inflow to 2023 stock 
+                    #Inflow_Detail_UsePhase_I[t_2023, I, r] = 0  # no inflow in first modeling year
 
-            divergence = np.einsum("rIt -> tIr", reported_stock[:,mS, mR, :, :]) - Stock_Detail_UsePhase_I[:,:,:,:].sum(axis=1)
+            # divergence: reported_stock is Nt-based -> use t_2023
+            divergence = np.einsum("rIt -> tIr", reported_stock[:, mS, mR, :, :]) - Stock_Detail_UsePhase_I[:, :, :, :].sum(axis=1)
+            total_reported = reported_stock[:, mS, mR, :, 35].sum()
+            total_modeled  = Stock_Detail_UsePhase_I[35, :, :, :].sum()
+            relative_div   = abs(divergence[35].sum()) / total_reported * 100
+
+            Mylog.info(f"Total reported stock from ESM in 2050:  {total_reported:.2f}")
+            Mylog.info(f"Total modeled stock in 2050:   {total_modeled:.2f}")
+            Mylog.info(f"Absolute divergence 2050 (reported ESM stock 2050 - modeled stock 2050):   {divergence[35].sum():.2f}")
+            Mylog.info(f"Relative divergence 2050:   {relative_div:.2f}%")
+
 
             # =============================================================================
             # 5) Aggregate to total stock curves
             # =============================================================================
 
-            # Sum over cohort dimension (axis=1) to get total stock per year, technology, region
             TotalStockCurves_UsePhase_I[:, :, :] = Stock_Detail_UsePhase_I.sum(axis=1)
-
 
             StockCurves_Totl[:,Sector_ind_loc,mS,mR] = TotalStockCurves_UsePhase_I[:,:,:].sum(axis=1).sum(axis=1).copy()
             StockCurves_Prod[:,Sector_ind_rge,mS,mR] = TotalStockCurves_UsePhase_I[:,:,:].sum(axis=2).copy()
@@ -2441,7 +2468,7 @@ for mS in range(2,NS): #SSP2 only
             Inflow_Prod_r[:,:,Sector_ind_rge,mS,mR]  = np.einsum('tIr->trI',Inflow_Detail_UsePhase_I).copy()
             Outflow_Prod[:,Sector_ind_rge,mS,mR]     = np.einsum('tcIr->tI',Outflow_Detail_UsePhase_I).copy()
             Outflow_Prod_r[:,:,Sector_ind_rge,mS,mR] = np.einsum('tcIr->trI',Outflow_Detail_UsePhase_I).copy()
-            StockCurves_Prod_pr[:,:,Sector_ind_rge,mS,mR]   = np.einsum('tcIr->trI',Stock_Detail_UsePhase_I).copy() # 2025-01-20, ch CIRCOMOD reporting
+            StockCurves_Prod_pr[:,:,Sector_ind_rge,mS,mR]   = np.einsum('tcIr->trI',Stock_Detail_UsePhase_I).copy()
 
 
         # Sector: Appliances, global coverage, will be calculated separately and waste will be added to wast mgt. inflow for 1st region.
@@ -2702,22 +2729,48 @@ for mS in range(2,NS): #SSP2 only
             # Check_nrb = (RECC_System.FlowDict['F_6_7'].Values[1::,0,Sector_nrb_rge,:,0] - F_6_7_new[1::,0,Sector_nrb_rge,:,0] - F_6_7_ren[1::,:,0,Sector_nrb_rge,:,0].sum(axis=2)) # must be 0.
             RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_nrb_rge,:,0]   = np.einsum('Ntrm->Ntrm',F_6_7_new[:,:,Sector_nrb_rge,:,0]) + np.einsum('Ntcrm->Ntrm',F_6_7_ren[:,:,:,Sector_nrb_rge,:,0])
         
-        if 'ind' in SectorList:
+        if 'ind' in SectorList:           
             # convert product stocks and flows to material stocks and flows, only for chemical element position 'all':
+
             # Stock elemental composition, historic for each element and for future years: 'all' elements only
             RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,:] = \
             np.einsum('tcrIme,tcIr->tcrIme',Par_3_MC_Stock_ByElement_Nr[:,:,:,Sector_ind_rge,:,:],Stock_Detail_UsePhase_I)/1000   # Indices='t,c,r,I,m,e' # division by /1000 to reach desried reporting of Mt
+            check1_S_7 = RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,:]
+            Mylog.info(f" RECC_System.StockDict['S_7'].Values[8,SwitchTime+8-1,1,3,:,0]: {RECC_System.StockDict['S_7'].Values[8,SwitchTime+8-1,1,3,:,0]*1000}")
+            Mylog.info(f"Par_3_MC_Stock_ByElement_Nr[8,SwitchTime+8-1,1,3,:,0]: {Par_3_MC_Stock_ByElement_Nr[8,SwitchTime+8-1,1,3,:,0]}")
+            Mylog.info(f"Stock_Detail_UsePhase_I[8,SwitchTime+8-1,3,1]{Stock_Detail_UsePhase_I[8,SwitchTime+8-1,3,1]}")
+            Mylog.info(f"Test: selected tech: {Sector_ind_list[3]}, selected region: {Sector_ind_regions[1]}, selected year: {2015+8}, cohort: {1900+SwitchTime+8-1}\
+                       , material: {Materials_loc[0]}, stock * 3_MC(m) should be respective value in S7 for material m or stock * 3_MC(m)-S7(m)=0: {(Stock_Detail_UsePhase_I[8,SwitchTime+8-1,3,1]*Par_3_MC_Stock_ByElement_Nr[8,SwitchTime+8-1,1,3,:,0][0])-(RECC_System.StockDict['S_7'].Values[8,SwitchTime+8-1,1,3,:,0]*1000)[0]} must equal 0")
+
             # Outflow, 'all' elements only:
             RECC_System.FlowDict['F_7_8'].Values[:,:,:,Sector_ind_rge,:,0] = \
             np.einsum('Itcrm,tcIr->Itcrm',Par_3_MC_Stock_ByElement_Nr[:,:,:,Sector_ind_rge,:,0],Outflow_Detail_UsePhase_I)/1000 # all elements, Indices='t,c,r,I,m'
-            # Inflow as mass balance, to account for renovation material inflows to other age-cohorts than the current one (t=c). # TODO: 2025-17-11 mg: why calculating the np.diff and why not also considering the elemental composition?
-            RECC_System.FlowDict['F_6_7'].Values[1::,:,Sector_ind_rge,:,0]   = \
-            np.einsum('Itcrm->Itrm',np.diff(RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,0],1,axis=1)) + np.einsum('Itcrm->Itrm',RECC_System.FlowDict['F_7_8'].Values[1::,:,:,Sector_ind_rge,:,0])    
+            
+            # NOTE: Inflow as mass balance, to account for reuse material inflows to other age-cohorts than the current one (t=c).
+            #RECC_System.FlowDict['F_6_7'].Values[1::,:,Sector_ind_rge,:,0]   = \
+            #np.einsum('Itcrm->Itrm',np.diff(RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,0],1,axis=1)) + np.einsum('Itcrm->Itrm',RECC_System.FlowDict['F_7_8'].Values[1::,:,:,Sector_ind_rge,:,0])   
+            #Check_ind_F_6_7_first = RECC_System.FlowDict['F_6_7'].Values[1::,:,Sector_ind_rge,:,0]            
+
+            #RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,0] = np.einsum('Itrm,tIr -> Itrm',Par_3_MC_Stock_ByElement_Nr[:,SwitchTime-1,:,Sector_ind_rge,:,0], Inflow_Detail_UsePhase_I[:,:,:])/1000
+            
             # inflow of materials in new products, for checking:
-            #for mmt in range(0,Nt):
-            #    F_6_7_new[mmt,:,Sector_ind_rge,:,0] = np.einsum('Ir,Irm->Irm',Inflow_Detail_UsePhase_I[mmt,:,:],Par_3_MC_Stock_ByElement_Nr[mmt,SwitchTime+mmt-1,:,Sector_ind_rge,:,0])/1000
-            #Check_ind = (RECC_System.FlowDict['F_6_7'].Values[1::,0,Sector_ind_rge,:,0] - F_6_7_new[1::,0,Sector_ind_rge,:,0]).sum() # must be 0.
-        #2026-01-27 tis imported material flows and stock
+            for mmt in range(0,Nt):
+                F_6_7_new[mmt,:,Sector_ind_rge,:,0] = np.einsum('Ir,Irm->Irm',Inflow_Detail_UsePhase_I[mmt,:,:],Par_3_MC_Stock_ByElement_Nr[mmt,SwitchTime+mmt-1,:,Sector_ind_rge,:,0])/1000
+                RECC_System.FlowDict['F_6_7'].Values[mmt,:,Sector_ind_rge,:,0] = F_6_7_new[mmt,:,Sector_ind_rge,:,0]
+                if mmt == 8:
+                    Mylog.info(f"F_6_7_new[mmt,:,3,:,0].shape: {F_6_7_new[mmt,1,3,:,0].shape}")
+                    Mylog.info(f"F_6_7_new[mmt,1,3,:,0] for {Materials_loc[0]}: {F_6_7_new[mmt,1,3,0,0]}")
+                    Mylog.info(f"RECC_System.FlowDict['F_6_7'].Values[mmt,:,Sector_ind_rge,:,0] for {Materials_loc[0]}:: {RECC_System.FlowDict['F_6_7'].Values[mmt,1,3,0,0]}")
+                    Mylog.info(f"mmt value: {mmt} Inflow_Detail_UsePhase_I[{mmt},3,1]: {Inflow_Detail_UsePhase_I[mmt,3,1]}")
+                    Mylog.info(f"Par_3_MC_Stock_ByElement_Nr[{mmt},SwitchTime+{mmt}-1,1,3,:,0] {Par_3_MC_Stock_ByElement_Nr[mmt,SwitchTime+mmt-1,1,3,:,0]}")
+                    Mylog.info(f"Test: selected tech: {Sector_ind_list[3]}, selected region: {Sector_ind_regions[1]}, selected year: {2015+mmt}, cohort: {1900+SwitchTime+mmt-1}\
+                       , material: {Materials_loc[0]}, inflow * 3_MC(m) should be respective value in F_6_7 for material m, or inflow * 3_MC(m)-F_6_7(m)=0: {(Inflow_Detail_UsePhase_I[mmt,3,1]*Par_3_MC_Stock_ByElement_Nr[mmt,SwitchTime+mmt-1,1,3,:,0][0])-(F_6_7_new[mmt,1,3,:,0]*1000)[0]} must equal 0")
+
+            Mylog.info(f" F_6_7_new[mmt,:,Sector_ind_rge,:,0]: {F_6_7_new[:,:,Sector_ind_rge,:,0].sum()}")
+            Mylog.info(f" RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,0]: {RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,0].sum()}")
+            Check_ind = (RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,0] - F_6_7_new[:,:,Sector_ind_rge,:,0]).sum() # must be 0.s
+            check1_F_6_7 = RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,0]
+
         if 'tis' in SectorList:
             # convert product stocks and flows to material stocks and flows, only for chemical element position 'all':
             # Stock elemental composition, historic for each element and for future years: 'all' elements only
@@ -2768,7 +2821,7 @@ for mS in range(2,NS): #SSP2 only
         ''' # remove eleven region industry representation
         if 'ind' in SectorList:
                 RECC_System.FlowDict['F_6_7_Nl'].Values[0,:,Sector_ind_rge_reg,:,:]   = \
-            np.einsum('Ilme,Il ->Ilme',Par_3_MC_Stock_ByElement_Nl[SwitchTime-1,:,Sector_ind_rge_reg,:,:],Inflow_Detail_UsePhase_I[0,:,:])/1000 # all elements, Indices='t,l,I,m,e'  '''
+            np.einsum('Ilme,Il ->Ilme',Par_3_MC_Stock_ByElement_Nl[SwitchTime-1,:,Sector_ind_rge_reg,:,:],Inflow_Detail_UsePhase_I[0,:,:])/1000 # all elements, Indices='t,l,L,m,e'  bzw. t,r,I,m,e'''
         if 'app' in SectorList:
             RECC_System.FlowDict['F_6_7_No'].Values[0,:,Sector_app_rge_reg,:,:]   = \
             np.einsum('aome,ao->aome',Par_3_MC_Stock_ByElement_No[SwitchTime-1,:,Sector_app_rge_reg,:,:],Inflow_Detail_UsePhase_a[0,:,:])/1000000000000 # all elements, Indices='t,o,a,m,e'  
@@ -3165,8 +3218,10 @@ for mS in range(2,NS): #SSP2 only
                 # update mat. composition by element for current year and latest age-cohort
                 Par_3_MC_Stock_ByElement_Nr[t,0:CohortOffset,:,Sector_pav_rge,:,:] = Par_3_MC_Stock_ByElement_Nr[t-1,0:CohortOffset,:,Sector_pav_rge,:,:]
                 Par_3_MC_Stock_ByElement_Nr[t,CohortOffset,:,Sector_pav_rge,:,:]   = np.einsum('me,pmr->prme',Par_Element_Composition_of_Materials_c[t,:,:],Par_RECC_MC_Nr[CohortOffset,:,Sector_pav_rge,:,mS,mR,t])
+                
                 RECC_System.FlowDict['F_6_7'].Values[t,:,Sector_pav_rge,:,:]   = \
                 np.einsum('prme,pr->prme',Par_3_MC_Stock_ByElement_Nr[t,CohortOffset,:,Sector_pav_rge,:,:],Inflow_Detail_UsePhase_p[t,:,:])/1000 # all elements, Indices='t,r,p,m,e'
+                
                 RECC_System.StockDict['S_7'].Values[t,0:CohortOffset+1,:,Sector_pav_rge,:,:] = \
                 np.einsum('pcrme,cpr->pcrme',Par_3_MC_Stock_ByElement_Nr[t,0:CohortOffset+1,:,Sector_pav_rge,:,:],Stock_Detail_UsePhase_p[t,0:CohortOffset+1,:,:])/1000 # All elements.
 
@@ -3216,11 +3271,33 @@ for mS in range(2,NS): #SSP2 only
                 # update mat. composition by element for current year and latest age-cohort
                 Par_3_MC_Stock_ByElement_Nr[t,0:CohortOffset,:,Sector_ind_rge,:,:] = Par_3_MC_Stock_ByElement_Nr[t-1,0:CohortOffset,:,Sector_ind_rge,:,:]
                 Par_3_MC_Stock_ByElement_Nr[t,CohortOffset,:,Sector_ind_rge,:,:]   = np.einsum('me,Imr->Irme',Par_Element_Composition_of_Materials_c[t,:,:],Par_RECC_MC_Nr[CohortOffset,:,Sector_ind_rge,:,mS,mR,t])
+                
                 RECC_System.FlowDict['F_6_7'].Values[t,:,Sector_ind_rge,:,:]   = \
                 np.einsum('Irme,Ir->Irme',Par_3_MC_Stock_ByElement_Nr[t,CohortOffset,:,Sector_ind_rge,:,:],Inflow_Detail_UsePhase_I[t,:,:])/1000 # all elements, Indices='t,r,I,m,e'
+                
                 RECC_System.StockDict['S_7'].Values[t,0:CohortOffset+1,:,Sector_ind_rge,:,:] = \
                 np.einsum('Icrme,cIr->Icrme',Par_3_MC_Stock_ByElement_Nr[t,0:CohortOffset+1,:,Sector_ind_rge,:,:],Stock_Detail_UsePhase_I[t,0:CohortOffset+1,:,:])/1000 # All elements.
-                
+
+                if t == 8:
+                    Mylog.info(f"Selected tech: {Sector_ind_list[3]}, selected region: {Sector_ind_regions[1]}, selected year: {2015+t}, CohortOffset: {CohortOffset}, material: {Materials_loc[0]}, t value: {t}")
+                    
+                    Mylog.info(f"F_6_7")
+                    Mylog.info(f"RECC_System.FlowDict['F_6_7'].Values[t,1,3,:,0].shape: {RECC_System.FlowDict['F_6_7'].Values[t,1,3,:,0].shape}")
+                    Mylog.info(f"Inflow_Detail_UsePhase_I[t,3,1]: {Inflow_Detail_UsePhase_I[t,3,1]}")
+                    Mylog.info(f"Par_3_MC_Stock_ByElement_Nr[t,CohortOffset,1,3,0,0]: {Par_3_MC_Stock_ByElement_Nr[t,CohortOffset,1,3,0,0]}")
+                    Mylog.info(f"Test: inflow * 3_MC(m) should be respective value in F_6_7 for material m, or inflow * 3_MC(m)-F_6_7(m)=0: {(Inflow_Detail_UsePhase_I[t,3,1]*Par_3_MC_Stock_ByElement_Nr[t,CohortOffset,1,3,0,0])-(RECC_System.FlowDict['F_6_7'].Values[t,1,3,0,0]*1000)} must equal 0")
+
+                    Mylog.info(f"S_7")
+                    Mylog.info(f"RECC_System.StockDict['S_7'].Values[t,0:CohortOffset+1,1,3,:,0].shape: {RECC_System.StockDict['S_7'].Values[t,0:CohortOffset+1,1,3,:,0].shape}")
+                    Mylog.info(f"Stock_Detail_UsePhase_I[{t},0:{CohortOffset+1},0,0]: {Stock_Detail_UsePhase_I[t,0:CohortOffset+1,0,0]}")
+                    Mylog.info(f"Par_3_MC_Stock_ByElement_Nr[t,0:CohortOffset+1,1,3,0,0]: {Par_3_MC_Stock_ByElement_Nr[t,0:CohortOffset+1,1,3,0,0]}")
+                    Mylog.info(f"Test: stock * 3_MC(m) should be respective value in S_7 for material m, or stock * 3_MC(m)-S_7(m)=0: {(Stock_Detail_UsePhase_I[t,0:CohortOffset+1,0,0]*Par_3_MC_Stock_ByElement_Nr[t,0:CohortOffset+1,1,3,0,0])-(RECC_System.StockDict['S_7'].Values[t,0:CohortOffset+1,1,3,0,0]*1000)} must equal 0")
+
+                if t == Nt-1:
+                    Mylog.info(f"RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,:]: {RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,0].sum()}")
+                    Mylog.info(f" RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,:]: {RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,:].sum()}")
+                    check2_F_6_7 = RECC_System.FlowDict['F_6_7'].Values[:,:,Sector_ind_rge,:,0]
+                    check2_S_7 = RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,:]
                 '''RECC_System.FlowDict['F_6_7_Nl'].Values[t,:,:,:,:]   = \
                 np.einsum('lIme,Il->lIme',Par_3_MC_Stock_ByElement_Nl[CohortOffset,:,:,:,:],Inflow_Detail_UsePhase_I[t,:,:])/1000 # all elements, Indices='t,l,I,m,e'                '''
             
@@ -4506,7 +4583,7 @@ if 'tis' in SectorList:
     Sector_tis_rge_rail = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['rail_IMAGE']]
     Sector_tis_rge_agg_road = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['cycle_IMAGE', 'other_IMAGE', 'road_IMAGE', 'motorway_IMAGE', 'pedestrian_IMAGE']]
 if 'ind' in SectorList:
-    Sector_ind_rge_Bio = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Biomass|Other (Not Elsewhere Specified)']]
+    Sector_ind_rge_Bio = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Biomass|w/o CCS']]
     Sector_ind_rge_Bio_CCS = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Biomass|w/ CCS']]
     Sector_ind_rge_Hydro = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Hydro|Other (Not Elsewhere Specified)']]
     Sector_ind_rge_CSP = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Solar|CSP']]
@@ -4520,7 +4597,7 @@ if 'ind' in SectorList:
     Sector_ind_rge_Gas = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Gas|Combined Cycle|Other (Not Elsewhere Specified)']]
     Sector_ind_rge_Coal_CCS = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Coal|w/ CCS']]
     Sector_ind_rge_Coal = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Coal|Other (Not Elsewhere Specified)']]
-    Sector_ind_rge_Bio_agg = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Biomass|Other (Not Elsewhere Specified)', 'Biomass|w/ CCS']]
+    Sector_ind_rge_Bio_agg = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Biomass|w/o CCS', 'Biomass|w/ CCS']]
     Sector_ind_rge_Solar_agg = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Solar|CSP', 'Solar|PV|Other (Not Elsewhere Specified)']]
     Sector_ind_rge_Wind_agg = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Wind|Onshore|Other (Not Elsewhere Specified)', 'Wind|Offshore|Other (Not Elsewhere Specified)']]
     Sector_ind_rge_Coal_agg = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Coal|w/ CCS', 'Coal|Other (Not Elsewhere Specified)']]
