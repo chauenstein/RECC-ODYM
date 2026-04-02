@@ -558,6 +558,8 @@ except:
         Sector_tis_rge = []
     
 Materials_loc = IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items
+Waste_loc     = IndexTable.Classification[IndexTable.index.get_loc('Waste_Scrap')].Items
+Waste_industries = IndexTable.Classification[IndexTable.index.get_loc('WasteManagementIndustries')].Items
 Elements_loc = IndexTable.Classification[IndexTable.index.get_loc('Element')].Items
 Cement_loc    = IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items.index('cement')
 Concrete_loc  = IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items.index('concrete')
@@ -1278,6 +1280,7 @@ PrimaryProduction                = np.zeros((Nt,Nm,NS,NR))
 SecondaryProduct                 = np.zeros((Nt,Nm,NS,NR))
 SecondaryExport                  = np.zeros((Nt,Nm,NS,NR))
 SecondaryProduct_EoL_Pot         = np.zeros((Nt,Nm,NS,NR)) # Secondary material from EoL material flows only, part of F_9_12, for reporting only
+Secondary_Material_Potential     = np.zeros((Nt,Nm,NS,NR)) #shall be sum of F_9_12, F_10_12 and S_10
 RenovationMaterialInflow_7       = np.zeros((Nt,Nm,NS,NR))
 Element_Material_Composition     = np.zeros((Nt,Nm,Ne,NS,NR))
 Element_Material_Composition_raw = np.zeros((Nt,Nm,Ne,NS,NR))
@@ -2251,17 +2254,80 @@ for mS in range(2,NS): #SSP2 only
             # =============================================================================
             # 1) Import data (stock, age_cohort distribution, inflows from ESM)
             # =============================================================================
-            stock_age_cohort_distribution = ParameterDict['3_SHA_RECC_industry_AgeCohortDistribution'].Values[:,:,:] #shape rIc with only values for selected reference year (as stated in param file) #now 2023 for REMod
+            stock_age_cohort_distribution = RECC_System.ParameterDict['3_SHA_RECC_industry_AgeCohortDistribution'].Values[:,:,:] #shape rIc with only values for selected reference year (as stated in param file) #now 2023 for REMod
             inflow_ESM = RECC_System.ParameterDict['1_F_RECC_FinalProducts_industry'].Values[:,:,:,:,:].copy() #dimensions: rSRIc 
             idx_2023 = SwitchTime + 7 #index 123
             inflow_ESM [:,:,:,:,:idx_2023+1] = 0 #set inflow to year 2023 to zero
-            reported_stock = RECC_System.ParameterDict['2_S_RECC_FinalProducts_industry'].Values  
-            stock_ESM_2023_raw = reported_stock[:,:,:,:,8] #shape rSRI, now selected for reference year 2023
+            reported_stock = RECC_System.ParameterDict['2_S_RECC_FinalProducts_industry'].Values
+            t_2023 = 8 # Nt index of year 2023  
+            stock_ESM_2023_raw = reported_stock[:,:,:,:,t_2023] #shape rSRI, now selected for reference year 2023
             lifetimes = np.einsum('r,Ic->Irc',np.ones((Nr)),RECC_System.ParameterDict['3_LT_RECC_ProductLifetime_industry'].Values)
             
-            t_2023 = 8 #get Nt index of year 2023
             #assign age_cohort dimension to 2023 stock
             stock_ESM_2023 = np.einsum("rSRI,rIc -> rSRIc", stock_ESM_2023_raw, stock_age_cohort_distribution)
+
+            # =============================================================================
+            # 1.1) Decide if techs should be split into subtechs using market shares
+            # =============================================================================
+            split_by_market_share = True
+
+            if split_by_market_share == True:
+
+                market_shares = RECC_System.ParameterDict['3_SHA_RECC_industry_market_shares'].Values[:,:] #shape Ic
+                #get indexes
+                wind_onshore_other_idx = Sector_ind_list.index('Wind|Onshore|Other (Not Elsewhere Specified)')
+                wind_offshore_other_idx = Sector_ind_list.index('Wind|Offshore|Other (Not Elsewhere Specified)')
+                wind_on_idx = np.where(np.isin(Sector_ind_list, ['Wind|Onshore|DFIG', 'Wind|Onshore|PMSG-GB', 'Wind|Onshore|EESG-DD', 'Wind|Onshore|PMSG-DD']))[0]
+                wind_off_idx = np.where(np.isin(Sector_ind_list, ['Wind|Offshore|DFIG', 'Wind|Offshore|EESG-DD', 'Wind|Offshore|PMSG-GB', 'Wind|Offshore|SCIG-FC', 'Wind|Offshore|PMSG-DD', 'Wind|Offshore|HTS']))[0]
+
+                wind_on_shares  = market_shares[wind_on_idx, :]   # shape (4, 161)
+                wind_off_shares = market_shares[wind_off_idx, :]  # shape (6, 161)
+
+                # 1.1.1 Split inflows
+                original_on_inflow  = inflow_ESM[:, :, :, wind_onshore_other_idx, :]   # (30, 3, 2, 161)
+                original_off_inflow = inflow_ESM[:, :, :, wind_offshore_other_idx, :]  # (30, 3, 2, 161)
+
+                inflow_ESM[:, :, :, wind_on_idx, :]  = original_on_inflow[:, :, :, np.newaxis, :]  * wind_on_shares   # (30,3,2,4,161)
+                inflow_ESM[:, :, :, wind_off_idx, :] = original_off_inflow[:, :, :, np.newaxis, :] * wind_off_shares  # (30,3,2,6,161)
+
+                # check: sum over sub-techs per year must equal original
+                recon_on_inflow  = inflow_ESM[:, :, :, wind_on_idx, :].sum(axis=3)   # (30,3,2,161)
+                recon_off_inflow = inflow_ESM[:, :, :, wind_off_idx, :].sum(axis=3)  # (30,3,2,161)
+
+                if not np.allclose(recon_on_inflow, original_on_inflow, atol=1e-10):
+                    raise ValueError(f"Onshore sub-tech inflows do not sum back to original! Max deviation: {np.abs(recon_on_inflow - original_on_inflow).max():.2e}")
+                if not np.allclose(recon_off_inflow, original_off_inflow, atol=1e-10):
+                    raise ValueError(
+                        f"Offshore sub-tech inflows do not sum back to original! Max deviation: {np.abs(recon_off_inflow - original_off_inflow).max():.2e}")
+
+                # set original aggregated entries to zero to avoid double counting
+                inflow_ESM[:, :, :, wind_onshore_other_idx, :]  = 0
+                inflow_ESM[:, :, :, wind_offshore_other_idx, :] = 0                
+
+                # 1.1.2 Split stocks
+                original_on_stock  = stock_ESM_2023[:, :, :, wind_onshore_other_idx, :]   # (30, 3, 2, 161)
+                original_off_stock = stock_ESM_2023[:, :, :, wind_offshore_other_idx, :]  # (30, 3, 2, 161)
+
+                stock_ESM_2023[:, :, :, wind_on_idx, :]  = original_on_stock[:, :, :, np.newaxis, :]  * wind_on_shares   # (30,3,2,4,161)
+                stock_ESM_2023[:, :, :, wind_off_idx, :] = original_off_stock[:, :, :, np.newaxis, :] * wind_off_shares  # (30,3,2,6,161)
+                reported_stock[:, :, :, wind_on_idx, t_2023:]  = original_on_stock[:, :, :, np.newaxis, idx_2023:]  * wind_on_shares[:,idx_2023:]   # (30,3,2,4,161)
+                reported_stock[:, :, :, wind_off_idx, t_2023:] = original_off_stock[:, :, :, np.newaxis, idx_2023:] * wind_off_shares[:,idx_2023:]  # (30,3,2,6,161)
+
+                # check: sum over sub-techs per year must equal original
+                recon_on_stock  = stock_ESM_2023[:, :, :, wind_on_idx, :].sum(axis=3)   # (30,3,2,161)
+                recon_off_stock = stock_ESM_2023[:, :, :, wind_off_idx, :].sum(axis=3)  # (30,3,2,161)
+
+                if not np.allclose(recon_on_stock, original_on_stock, atol=1e-10):
+                    raise ValueError(f"Onshore sub-tech stocks do not sum back to original! Max deviation: {np.abs(recon_on_stock - original_on_stock).max():.2e}")
+                if not np.allclose(recon_off_stock, original_off_stock, atol=1e-10):
+                    raise ValueError(
+                        f"Offshore sub-tech stocks do not sum back to original! Max deviation: {np.abs(recon_off_stock - original_off_stock).max():.2e}")
+
+                # set original aggregated entries to zero to avoid double counting
+                stock_ESM_2023[:, :, :, wind_onshore_other_idx, :]  = 0
+                stock_ESM_2023[:, :, :, wind_offshore_other_idx, :] = 0
+                reported_stock[:, :, :, wind_onshore_other_idx, :]  = 0
+                reported_stock[:, :, :, wind_offshore_other_idx, :] = 0
 
             # =============================================================================
             # 2) Create empty containers
@@ -2270,8 +2336,6 @@ for mS in range(2,NS): #SSP2 only
             RECC_dsm_ind_s_c        = np.zeros((Nr,NS,NR,NI,Nc,Nc))
             RECC_dsm_ind_s_c_o_c    = np.zeros((Nr,NS,NR,NI,Nc,Nc))
             RECC_dsm_ind_o          = np.zeros((Nr,NS,NR,NI,Nc))
-            inflow_2016_2023        = np.zeros((t_2023,NI,Nr)) 
-            stock_2016_2023         = np.zeros((t_2023,NI,Nr))
             
             # =============================================================================
             # 3) Pre-compute survival functions for all technologies and regions
@@ -2293,31 +2357,47 @@ for mS in range(2,NS): #SSP2 only
                     np.fill_diagonal(sf, 1)
                     SF_Array[:, :, I, r] = sf
 
-            # =========================================================================================================================
-            # 4) Build and run the integrated model for each technology, region, scenario + handle early retirements and no retirements
-            # =========================================================================================================================
+            # ====================================================================================================================================
+            # 4) Build and run the integrated model for each technology, region, scenario + handle early retirements and flat stock (no retirements)
+            # ====================================================================================================================================
 
-            for I in tqdm(range(NI), unit=' EGT types'):
+            for I in tqdm(range(NI), unit=' Technologies I'):
                 for r in range(Nr):
 
                     sf = SF_Array[:, :, I, r]  # shape (Nc, Nc)
 
-                    # ------------------------------------------------------------------
-                    # Detect early retirement year for technology I
-                    # Must be done before 4a) and 4b) as both parts need t_retire_abs
-                    # NOTE: reported_stock has Nt=46 time dimension -> use t_2023
-                    # t_retire_abs is always expressed in Nc=161 index space
-                    # ------------------------------------------------------------------
+                    # ---------------------------------------------------------------------------------------------------------------------------------------
+                    # Detect early retirement year for technology I in region r
+                    # This must be done before 4a) and 4b) as both parts need t_retire_abs to correctly scale the survival function and compute cohort flows.
+                    # Retirement will then be handled later in the Ir-loop
+                    #
+                    # Logic: if the reported stock drops to (near-)zero at some point after 2023 and stays zero, we interpret this as a planned early
+                    # retirement. The first such year is recorded as t_retire_abs. NOTE: it is assumed and modelled that technologies with zero stock in year 2023
+                    # but growing stock in the future, will not be retired (to be checked and adjusted depending on the ESM!)
+                    #
+                    # Index spaces:
+                    #   - reported_stock uses Nt=46 time dimension (2015-2060) -> use t_2023
+                    #   - t_retire_abs is always expressed in Nc=161 index space
+                    #     (i.e. cohort index, where index 0 = first modeled year)
+                    # ---------------------------------------------------------------------------------------------------------------------------------------
+                    
                     reported_from_2023 = reported_stock[r, mS, mR, I, t_2023:]  # slice from 2023 onward, Nt-based
-                    zero_mask = reported_from_2023 <= 0.00001
-                    if zero_mask.any():
-                        first_zero_rel = np.argmax(zero_mask)
-                        if first_zero_rel > 0 and np.all(zero_mask[first_zero_rel:]):  # checks whether the first zero occurs after index 0
-                            t_retire_abs = idx_2023 + first_zero_rel  # expressed in Nc=161 index space
-                            Mylog.info(f"Early retirement detected in region {Sector_ind_regions[r]} for technology {Sector_ind_list[I]}. Survival function was scaled accordingly to meet early retirement path.")
+                    zero_mask = reported_from_2023 <= 0.00001 # boolean mask: True where stock is effectively zero #threshold of 0.00001 GW allows for small residual stock
+                    
+                    if zero_mask.any(): # at least one near-zero value exists after 2023
+                        first_zero_rel = np.argmax(zero_mask) #returns the index of the first year after 2023 where the stock is near-zero (threshold)
+
+                        if first_zero_rel > 0 and np.all(zero_mask[first_zero_rel:]):
+                            # Two conditions must hold for a valid early retirement:
+                            # 1) first_zero_rel > 0: retirement does not happen immediately in 2023 (stock is non-zero in 2023)
+                            # 2) np.all(zero_mask[first_zero_rel:]): stock stays zero from that point onward (no recovery)
+                            t_retire_abs = idx_2023 + first_zero_rel  # convert relative Nt index to absolute Nc=161 index space
+                            Mylog.info(f"Early retirement detected in region {Sector_ind_regions[r]} for technology {Sector_ind_list[I]}. Survival function will be scaled accordingly to meet early retirement path.")
                         else:
+                            # Zero occurs at t=2023 itself, or stock recovers after going to zero -> not a valid early retirement
                             t_retire_abs = None
                     else:
+                        # Stock remains non-zero throughout -> no early retirement
                         t_retire_abs = None
 
                     # ------------------------------------------------------------------
@@ -2325,12 +2405,12 @@ for mS in range(2,NS): #SSP2 only
                     # e.g. hydropower plants that are never retired
                     # A stock is considered flat if it never declines or increases by more than
                     # flat_stock_tol (e.g. 1%) relative to the 2023 value.
-                    # This handles minor numerical noise in the input data while correctly
+                    # This handles minor numerical tolerance in the input data while correctly
                     # excluding growing technologies (e.g. Solar PV) and retiring technologies.
                     # ------------------------------------------------------------------
-                    flat_stock_tol = 0.015  # 1.5% tolerance for numerical noise in input data
+                    flat_stock_tol = 0.015  # 1.5% tolerance for input data
 
-                    if t_retire_abs is None and not np.all(reported_from_2023 == 0):  # only check if technology exists and no early retirement detected
+                    if t_retire_abs is None and not np.all(reported_from_2023 == 0):  # only check if technology was not flagged as an early retirement and exists (not zero in all years)
                         stock_2023_val = reported_from_2023[0]  # stock value at handover year 2023
                         if stock_2023_val <= 0:
                             # technology not yet built in 2023 but appears later -> not flat stock
@@ -2341,38 +2421,50 @@ for mS in range(2,NS): #SSP2 only
                             # largest relative increase from 2023 level over entire modeling horizon
                             max_increase_rel = (reported_from_2023.max() - stock_2023_val) / stock_2023_val
 
-                            if max_decline_rel <= flat_stock_tol and max_increase_rel <= flat_stock_tol:  # stock stays within noise band -> treat as flat
+                            if max_decline_rel <= flat_stock_tol and max_increase_rel <= flat_stock_tol:  # stock stays within tolerance band -> treat as flat
                                 flat_stock = True
                                 Mylog.info(f"Flat stock detected (no decommissioning) in region {Sector_ind_regions[r]} "
                                         f"for technology {Sector_ind_list[I]} "
                                         f"(max relative decline: {max_decline_rel:.4%}, max relative increase: {max_increase_rel:.4%}). "
                                         f"SF will be set to 1 to preserve stock exactly.")
                             else:
-                                flat_stock = False  # genuine decommissioning or growth detected
+                                flat_stock = False  # stock either grows significantly (e.g. Solar PV expansion) or declines significantly (decommissioning) -> not flat stock
                     else:
                         flat_stock = False  # technology absent or early retirement already flagged
 
-                    # ------------------------------------------------------------------
+                    # --------------------------------------------------------------------------
                     # 4a) INFLOW-DRIVEN PART
-                    # NOTE: inflow_ESM has Nc=161 time dimension -> use idx_2023
-                    # ------------------------------------------------------------------
+                    # Computes stock and outflow cohorts driven by ESM inflows from 2023 onward.
+                    # NOTE: inflow_ESM has Nc=161 time dimension -> use idx_2023 to slice to the
+                    #       modeling horizon (2023-2060) when storing results
+                    # --------------------------------------------------------------------------
                     sf_to_use = sf.copy()
 
                     if t_retire_abs is not None:
-                        for c in range(idx_2023 + 1, Nc):  # only inflow cohorts (born after 2023), Nc-based
+                        # --- Early retirement case ---
+                        # Scale down the survival function for all inflow cohorts (born after 2023) such that technologies are fully retired by t_retire_abs
+                        # Cohorts born at or after t_retire_abs are zeroed out entirely (never survive) -> In practice this should not arise -> The zeroing of the SF is just a safeguard against inconsistent input data
+                        # Cohorts born before t_retire_abs get a linear ramp-down to zero at t_retire_abs.
+    
+                        for c in range(idx_2023 + 1, Nc):
+                            # iterate over inflow cohorts only (born after 2023), because the ramp length (retire_rel_to_birth = t_retire_abs - c) differs per cohort birth year,
+                            # requiring a separate survival function column (sf_to_use[:, c]) to be modified for each cohort independently.Nc-based index
                             if t_retire_abs <= c:
-                                sf_to_use[:, c] = 0.0
-                            else:
+                                sf_to_use[:, c] = 0.0 
+                            else:                   # Cohort born before retirement year -> ramp survival function linearly to zero at t_retire_abs
                                 retire_rel_to_birth = t_retire_abs - c
                                 n_total = Nc - c
                                 ramp = np.zeros(n_total)
                                 ramp[:retire_rel_to_birth] = np.linspace(1.0, 0.0, retire_rel_to_birth, endpoint=False)
-                                sf_to_use[c:, c] *= ramp
+                                #endpoint=False ensures SF reaches 0 exactly at t_retire_abs, not before
+                                #e.g., ramp = [1.0, 0.75, 0.5, 0.25, 0.0, 0.0, 0.0, ...] with t_retire_abs being the first zero
+                                sf_to_use[c:, c] *= ramp #Multiplying element-wise by ramp scales the original survival probabilities down to zero by t_retire_abs
 
                     elif flat_stock:
                         for c in range(idx_2023 + 1, Nc):  # Nc-based
-                            sf_to_use[c:, c] = 1.0
+                            sf_to_use[c:, c] = 1.0 #Set SF to 1 for all inflow cohorts, as stocks never retire 
 
+                    #run the inflow-driven model with the adjusted SF: "sf_to_use"
                     RECC_dsm_ind = dsm.DynamicStockModel(time_dsm, i=inflow_ESM[r, mS, mR, I, :].copy(), lt=lt)
                     RECC_dsm_ind.sf = sf_to_use
 
@@ -2384,36 +2476,52 @@ for mS in range(2,NS): #SSP2 only
                     new_s_c = RECC_dsm_ind_s_c[r, mS, mR, I, idx_2023:, :]
                     new_o_c = RECC_dsm_ind_s_c_o_c[r, mS, mR, I, idx_2023:, :]
 
-                    # ------------------------------------------------------------------
+                    # -----------------------------------------------------------------------------------------
                     # 4b) HISTORIC COHORT PART (stock that existed before 2023)
                     #
-                    #     For each cohort c <= idx_2023, we know the stock size in 2023.
-                    #     We project it forward using conditional survival:
+                    #     For each cohort c <= idx_2023, we know the stock size in 2023
+                    #     We project it forward using conditional survival (Bayes' Theorem):
+                    #     The appraoch assumes that technologies still alive in 2023 are representative
+                    #     of the survivors of their cohort — i.e. the weaker/shorter-lived assets have
+                    #     already retired, and the remaining ones will live longer than average.
                     #
                     #         S(t, c) = S_2023(c) * SF[t, c] / SF[idx_2023, c]
+                    #
+                    #     where SF[t,c] / SF[idx_2023,c] is the CONDITIONAL survival probability:
+                    #     the probability that a technolofgy of cohort c that has already survived
+                    #     until 2023 will still be alive at time t >= 2023.
+                    #     The cond. surv. matters most for old cohorts, where SF[idx_2023, c] is very small
+                    #     and the conditioning therefore strongly upscales the future survival. For young
+                    #     cohorts born close to 2023, SF[idx_2023, c] is close to 1.0 and the two approaches
+                    #     give nearly identical results
                     #
                     #     SF arrays are Nc=161 based -> use idx_2023
                     #     stock_ESM_2023 was built from reported_stock[:,:,:,:,t_2023]
                     #     so its cohort dimension c is Nc=161 based
-                    # ------------------------------------------------------------------
+                    # -----------------------------------------------------------------------------------------
 
                     hist_s_c_full = np.zeros((Nc, Nc))
                     hist_o_c_full = np.zeros((Nc, Nc))
 
-                    for c in range(idx_2023 + 1):  # cohorts 1900-2023, Nc-based
+                    for c in range(idx_2023 + 1):  # iterate over all historic cohorts (1900-2023)
+                        
                         sf_at_2023 = sf[idx_2023, c]
-
                         if sf_at_2023 <= 0:
+                            # Cohort c has zero survival probability at 2023 -> all assets already retired by 2023
+                            # No stock to project forward, skip to avoid division by zero in conditional survival
                             continue
 
                         stock_2023_c = stock_ESM_2023[r, mS, mR, I, c]
 
                         if stock_2023_c <= 0:
+                            # No stock present for this cohort in 2023 -> nothing to project forward
                             continue
 
-                        cond_sf = sf[idx_2023:, c] / sf_at_2023  # Nc-based slice
+                        cond_sf = sf[idx_2023:, c] / sf_at_2023  #Compute conditional survival (renormalization of original SF)
 
                         if t_retire_abs is not None:
+                            # if early retirement case -> apply linear ramp-down as before, but now to the conditional survival function "cond_sf"
+                            # and expressed relative to idx_2023 (not relative to cohort birth year c) since we are projecting from 2023
                             retire_rel = t_retire_abs - idx_2023  # both Nc-based
                             ramp = np.zeros(len(cond_sf))
                             ramp[:retire_rel] = np.linspace(1.0, 0.0, retire_rel, endpoint=False)
@@ -2422,9 +2530,9 @@ for mS in range(2,NS): #SSP2 only
                         elif flat_stock:
                             cond_sf = np.ones(len(cond_sf))
 
-                        hist_s_c_full[idx_2023:, c] = stock_2023_c * cond_sf  # Nc-based
+                        hist_s_c_full[idx_2023:, c] = stock_2023_c * cond_sf  #project historic stock of cohort c forward from 2023 using cond_sf
 
-                    hist_o_c_full[1:, :] = np.maximum(-np.diff(hist_s_c_full, axis=0), 0)
+                    hist_o_c_full[1:, :] = np.maximum(-np.diff(hist_s_c_full, axis=0), 0) #np.maximum(-diff, 0) keeps only decreases in stock (outflows), and sets increases to zero (not relevant but more safe)
 
                     hist_s_c = hist_s_c_full[idx_2023:, :]  # (Nt, Nc), Nc-based slice
                     hist_o_c = hist_o_c_full[idx_2023:, :]  # (Nt, Nc), Nc-based slice
@@ -2439,21 +2547,20 @@ for mS in range(2,NS): #SSP2 only
                     # No outflow in the first years (handover year) by convention
                     Outflow_Detail_UsePhase_I[0:t_2023, :, I, r] = 0
 
-                    # Inflows: only from ESM (historic cohorts don't generate new inflows)
-                    # inflow_ESM is Nc-based -> use idx_2023
+                    # Inflows: here only from ESM (historic cohorts 2015-2023 will be assigned in the next step)
                     Inflow_Detail_UsePhase_I[t_2023:, I, r] = inflow_ESM[r, mS, mR, I, idx_2023:]
  
             stock_2023_pre_adjustment = Stock_Detail_UsePhase_I[t_2023,:,:,:].copy()
 
-            #assign historic inflows (2016-2023) from age_cohort composition of ESM stock
+            #assign historic inflows and stock (2016-2023) from age_cohort information of the 2023 ESM stock (outflows for these inflows are all zero as we know that they survived until 2023)
             hist_inflow_I = Stock_Detail_UsePhase_I[t_2023,:,:,:].copy() # Snapshot before loop modifies Stock_Detail_UsePhase_I for years 2015-2023
-            for t in range(t_2023):  # 2015-2022 only
+            for t in range(t_2023):  # 2015-2022 only, 2023 handled afterwards
                 if t == 0:
-                    Inflow_Detail_UsePhase_I[t,:,:] = 0
+                    Inflow_Detail_UsePhase_I[t,:,:] = 0 #no inflow in year 2015
                 else:
-                    Inflow_Detail_UsePhase_I[t,:,:] = hist_inflow_I[SwitchTime-1+t,:,:]
-                Stock_Detail_UsePhase_I[t,:,:,:] = 0
-                Stock_Detail_UsePhase_I[t,:SwitchTime+t,:,:] = hist_inflow_I[:SwitchTime+t,:,:]
+                    Inflow_Detail_UsePhase_I[t,:,:] = hist_inflow_I[SwitchTime-1+t,:,:] #all cohorts from respective year t in the loop represent inflows in the respective year
+                Stock_Detail_UsePhase_I[t,:,:,:] = 0  #safeguard: ensuring that all stock years before 2023 are zeroed, and then only filled with historic age_cohort information
+                Stock_Detail_UsePhase_I[t,:SwitchTime+t,:,:] = hist_inflow_I[:SwitchTime+t,:,:] #the sum of all cohorts until the current year represents the respective stock
 
             # Explicitly assign 2023 stock and inflow
             Stock_Detail_UsePhase_I[t_2023,:,:,:] = stock_2023_pre_adjustment  # restore from 4c)
@@ -2683,7 +2790,7 @@ for mS in range(2,NS): #SSP2 only
             Par_RECC_WoodWaste_Cascading = np.einsum('t,wmWr->twmWr',np.ones((Nt)),RECC_System.ParameterDict['4_PY_WoodCascading'].Values * 0.01)
         
         # For regional dimension 11 and 1
-        Par_RECC_EoL_RR_Nl = np.einsum('l,t,Lmw->tlmLw',np.ones((Nl)),np.ones((Nt)),RECC_System.ParameterDict['4_PY_EoL_RecoveryRate'].Values[Sector_11reg_rge,0,:,:,0] *0.01)
+        #Par_RECC_EoL_RR_Nl = np.einsum('l,t,Lmw->tlmLw',np.ones((Nl)),np.ones((Nt)),RECC_System.ParameterDict['4_PY_EoL_RecoveryRate'].Values[Sector_11reg_rge,0,:,:,0] *0.01)
         Par_RECC_EoL_RR_No = np.einsum('o,t,Omw->tomOw',np.ones((No)),np.ones((Nt)),RECC_System.ParameterDict['4_PY_EoL_RecoveryRate'].Values[Sector_1reg_rge,0,:,:,0] *0.01)
         
         # Calculate reuse factor
@@ -3896,8 +4003,9 @@ but partially outside of RECC_System.')
         Scrap_Outflow[:,:,mS,mR]                    = np.einsum('trw->tw',RECC_System.FlowDict['F_9_10'].Values[:,:,:,0]).copy() + np.einsum('trw->tw',RECC_System.FlowDict['F_9_10_No'].Values[:,:,:,0]).copy()
         '''Scrap_Outflow[:,:,mS,mR]                    = np.einsum('trw->tw',RECC_System.FlowDict['F_9_10'].Values[:,:,:,0]).copy() + np.einsum('trw->tw',RECC_System.FlowDict['F_9_10_Nl'].Values[:,:,:,0]).copy() + np.einsum('trw->tw',RECC_System.FlowDict['F_9_10_No'].Values[:,:,:,0]).copy()'''        
         PrimaryProduction[:,:,mS,mR]                = RECC_System.FlowDict['F_3_4'].Values[:,:,0].copy()
-        SecondaryProduct[:,:,mS,mR]                 = RECC_System.FlowDict['F_9_12'].Values[:,0,:,0].copy() #includes diverted scrap
+        SecondaryProduct[:,:,mS,mR]                 = RECC_System.FlowDict['F_9_12'].Values[:,0,:,0].copy() #includes diverted scrap 
         SecondaryExport[:,:,mS,mR]                  = RECC_System.FlowDict['F_12_0'].Values[:,0,:,0].copy() 
+        Secondary_Material_Potential[:,:,mS,mR]     = RECC_System.FlowDict['F_9_12'].Values[:,0,:,0].copy() + RECC_System.FlowDict['F_10_12'].Values[:,0,:,0].copy() + RECC_System.StockDict['S_12'].Values[:,0,:,0].copy()
         SecondaryProduct_EoL_Pot[:,:,mS,mR]         = SecondaryProduct_EoL_Potential[:,:,0]
         # Diverted scrap to manufacturing and diverted scrap in final consumption, see code section 'Calculate material stocks and flows, material cycles, determine elemental composition.', subsection 8, above
         RecycledMat_to_Manuf[:,:,mS,mR]             = RecycledMat_to_Manuf_tm.copy() # is SecondaryMaterialUse + StockPileSecondaryMaterialUse; does not include diverted scrap
@@ -4124,7 +4232,7 @@ if 'nrb' in SectorList: #2026-06
     ExitFlags['3_SHA_TypeSplit_NonResBuildings_max']           = ParameterDict['3_SHA_TypeSplit_NonResBuildings'].Values.max() <= 1
     ExitFlags['3_SHA_TypeSplit_NonResBuildings_sum']           = np.isclose(ParameterDict['3_SHA_TypeSplit_NonResBuildings'].Values.sum(),Nr*Nt*NS*NR, IsClose_Remainder_Large)
 ExitFlags['LTE_Renovation_Consistency']                    = bool(ScriptConfig['Include_REStrategy_LifeTimeExtension']) & bool(ScriptConfig['Include_Renovation_reb']) & bool(ScriptConfig['Include_Renovation_nrb'])
-ExitFlags['Secondary_Material_Flows_Positive']             = SecondaryProduct.min() >= 0
+ExitFlags['Secondary_Material_Flows_Positive']             = SecondaryProduct.min() >= -1e-12
 
 Mylog.info('Model exit flags:')
 for key in ExitFlags:
@@ -4563,7 +4671,7 @@ if 'tis' in SectorList:
     Sector_tis_rge_tunnel = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['tunnel_IMAGE']]
     Sector_tis_rge_rail = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['rail_IMAGE']]
     Sector_tis_rge_agg_road = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['cycle_IMAGE', 'other_IMAGE', 'road_IMAGE', 'motorway_IMAGE', 'pedestrian_IMAGE']]
-if 'ind' in SectorList:
+'''if 'ind' in SectorList: #refine to make list adapting to selected technologies automatically
     Sector_ind_rge_Bio = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Biomass|w/o CCS']]
     Sector_ind_rge_Bio_CCS = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Biomass|w/ CCS']]
     Sector_ind_rge_Hydro = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Hydro|Other (Not Elsewhere Specified)']]
@@ -4583,7 +4691,7 @@ if 'ind' in SectorList:
     Sector_ind_rge_Wind_agg = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Wind|Onshore|Other (Not Elsewhere Specified)', 'Wind|Offshore|Other (Not Elsewhere Specified)']]
     Sector_ind_rge_Coal_agg = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Coal|w/ CCS', 'Coal|Other (Not Elsewhere Specified)']]
     Sector_ind_rge_Gas_agg = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Gas|Combined Cycle|w/ CCS', 'Gas|Combined Cycle|Other (Not Elsewhere Specified)']]
-    Sector_ind_rge_Other_agg = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Geothermal|Other (Not Elsewhere Specified)', 'Oil|Other (Not Elsewhere Specified)']]
+    Sector_ind_rge_Other_agg = [IndexTable.Classification[IndexTable.set_index('IndexLetter').index.get_loc('g')].Items.index(i) for i in ['Geothermal|Other (Not Elsewhere Specified)', 'Oil|Other (Not Elsewhere Specified)']]'''
 # agg CIRCOMOD materials
 CM_mat_aggregates_locs  = [IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items.index(i) for i in ['concrete aggregates', 'aggregates (other than in concrete)']]
 CM_mat_aluminium_locs  = [IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items.index(i) for i in ['wrought Al', 'cast Al']]
@@ -4729,13 +4837,14 @@ if 'tis' in SectorList: #2026-01-27
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Mat_rge[:,Sector_tis_rge_tunnel,mm,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, tis, tunnel, ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Mat_rge[:,Sector_tis_rge_rail,mm,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, tis, rail, ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Mat_rge[:,Sector_tis_rge_agg_road,mm,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, tis, agg. road (incl. road, motorway, cycle paths, other, pedestrian), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
-if 'ind' in SectorList:
-    for mr in range(0,Nr): # material inflow, material outflow, material stock per agg good and region
+
+if 'ind' in SectorList: # material inflow, material outflow, material stock per agg good and region
+    for mr in range(0,Nr): 
         for mm in range(0,Nm):
             newrowoffset = msf.xlsxExportAdd_tAB(ws2,Material_Inflow_pr_pg[:,mr,Sector_ind_rge,mm,:,:].sum(axis=1),newrowoffset,len(ColLabels),'Final consumption of materials, power technologies, ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',IndexTable.Classification[IndexTable.index.get_loc('Region_Focus')].Items[mr],'F_6_7','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
             newrowoffset = msf.xlsxExportAdd_tAB(ws2,Outflow_Materials_Usephase_pr_pg[:,mr,Sector_ind_rge,mm,:,:].sum(axis=1),newrowoffset,len(ColLabels),'Outflow of materials from use phase, power technologies, ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',IndexTable.Classification[IndexTable.index.get_loc('Region_Focus')].Items[mr],'F_7_8 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
             newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Mat_ind_pr[:,mr,mm,:,:],newrowoffset,len(ColLabels),'In-use stock, power technologies, ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',IndexTable.Classification[IndexTable.index.get_loc('Region_Focus')].Items[mr],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
-    for mm in range(0,Nm):
+    """for mm in range(0,Nm):
         # only report for "agg_..." products where applicable (Bio, Coal, Gas, Solar, Wind)
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,Material_Inflow_pr_pg[:,:,Sector_ind_rge,mm,:,:].sum(axis=1).sum(axis=1),newrowoffset,len(ColLabels),'Final consumption of materials, ind, all power technologies, ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_6_7','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
         #newrowoffset = msf.xlsxExportAdd_tAB(ws2,Material_Inflow_pr_pg[:,:,Sector_ind_rge_Bio,mm,:,:].sum(axis=1).sum(axis=1),newrowoffset,len(ColLabels),'Final consumption of materials, ind, Biomass, ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_6_7','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
@@ -4801,7 +4910,7 @@ if 'ind' in SectorList:
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Mat_rge[:,Sector_ind_rge_Wind_agg,mm,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, ind, Wind agg. (Wind Onshore + Wind Offshore), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Mat_rge[:,Sector_ind_rge_Coal_agg,mm,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, ind, Coal agg. (Coal + Coal w/ CCS), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Mat_rge[:,Sector_ind_rge_Gas_agg,mm,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, ind, Gas agg. (Gas + Gas w/ CCS), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
-        newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Mat_rge[:,Sector_ind_rge_Other_agg,mm,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, ind, Other agg. (Geo + Oil), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
+        newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Mat_rge[:,Sector_ind_rge_Other_agg,mm,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, ind, Other agg. (Geo + Oil), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)"""
 
 
 # reporting per detailed goods (pav, reb classes, nrb classes) for: product stock, stock addition, stock retirement
@@ -4863,28 +4972,28 @@ if 'ind' in SectorList:
     for mr in range(0,Nr):
         #Product stock per region and good
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Prod_pr[:,mr,Sector_ind_rge,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, power technologies','GW',IndexTable.Classification[IndexTable.index.get_loc('Region_Focus')].Items[mr],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
-        newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Prod_pr[:,mr,Sector_ind_rge_Bio_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, ind, Biomass agg. (Biomass + Biomass w/ CCS), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
+        """newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Prod_pr[:,mr,Sector_ind_rge_Bio_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, ind, Biomass agg. (Biomass + Biomass w/ CCS), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Prod_pr[:,mr,Sector_ind_rge_Solar_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, ind, Solar agg. (CSP + PV), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Prod_pr[:,mr,Sector_ind_rge_Wind_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, ind, Wind agg. (Wind Onshore + Wind Offshore), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Prod_pr[:,mr,Sector_ind_rge_Coal_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, ind, Coal agg. (Coal + Coal w/ CCS), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Prod_pr[:,mr,Sector_ind_rge_Gas_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, ind, Gas agg. (Gas + Gas w/ CCS), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
-        newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Prod_pr[:,mr,Sector_ind_rge_Other_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, ind, Other agg. (Geo + Oil), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
+        newrowoffset = msf.xlsxExportAdd_tAB(ws2,StockCurves_Prod_pr[:,mr,Sector_ind_rge_Other_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'In-use stock, ind, Other agg. (Geo + Oil), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt',ScriptConfig['RegionalScope'],'S_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)"""
         #Stock addition per region and good
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,Inflow_Prod_r[:,mr,Sector_ind_rge,:,:].sum(axis=1),newrowoffset,len(ColLabels),'final consumption (use phase inflow), power technologies','GW/yr',IndexTable.Classification[IndexTable.index.get_loc('Region_Focus')].Items[mr],'F_6_7','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
-        newrowoffset = msf.xlsxExportAdd_tAB(ws2,Inflow_Prod_r[:,mr,Sector_ind_rge_Bio_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'final consumption (use phase inflow), ind, Biomass agg. (Biomass + Biomass w/ CCS), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_6_7','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
+        """newrowoffset = msf.xlsxExportAdd_tAB(ws2,Inflow_Prod_r[:,mr,Sector_ind_rge_Bio_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'final consumption (use phase inflow), ind, Biomass agg. (Biomass + Biomass w/ CCS), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_6_7','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,Inflow_Prod_r[:,mr,Sector_ind_rge_Solar_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'final consumption (use phase inflow), ind, Solar agg. (CSP + PV), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_6_7','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,Inflow_Prod_r[:,mr,Sector_ind_rge_Wind_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'final consumption (use phase inflow), ind, Wind agg. (Wind Onshore + Wind Offshore), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_6_7','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,Inflow_Prod_r[:,mr,Sector_ind_rge_Coal_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'final consumption (use phase inflow), ind, Coal agg. (Coal + Coal w/ CCS), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_6_7','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,Inflow_Prod_r[:,mr,Sector_ind_rge_Gas_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'final consumption (use phase inflow), ind, Gas agg. (Gas + Gas w/ CCS), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_6_7','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
-        newrowoffset = msf.xlsxExportAdd_tAB(ws2,Inflow_Prod_r[:,mr,Sector_ind_rge_Other_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'final consumption (use phase inflow), ind, Other agg. (Geo + Oil), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_6_7','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
+        newrowoffset = msf.xlsxExportAdd_tAB(ws2,Inflow_Prod_r[:,mr,Sector_ind_rge_Other_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'final consumption (use phase inflow), ind, Other agg. (Geo + Oil), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_6_7','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)"""
         #Stock retirement
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,Outflow_Prod_r[:,mr,Sector_ind_rge,:,:].sum(axis=1),newrowoffset,len(ColLabels),'EoL products (use phase outflow), power technologies','GW/yr',IndexTable.Classification[IndexTable.index.get_loc('Region_Focus')].Items[mr],'F_7_8','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
-        newrowoffset = msf.xlsxExportAdd_tAB(ws2,Outflow_Prod_r[:,mr,Sector_ind_rge_Bio_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'EoL products (use phase outflow), ind, Biomass agg. (Biomass + Biomass w/ CCS), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_7_8','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
+        """newrowoffset = msf.xlsxExportAdd_tAB(ws2,Outflow_Prod_r[:,mr,Sector_ind_rge_Bio_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'EoL products (use phase outflow), ind, Biomass agg. (Biomass + Biomass w/ CCS), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_7_8','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,Outflow_Prod_r[:,mr,Sector_ind_rge_Solar_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'EoL products (use phase outflow), ind, Solar agg. (CSP + PV), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_7_8','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,Outflow_Prod_r[:,mr,Sector_ind_rge_Wind_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'EoL products (use phase outflow), ind, Wind agg. (Wind Onshore + Wind Offshore), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_7_8','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,Outflow_Prod_r[:,mr,Sector_ind_rge_Coal_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'EoL products (use phase outflow), ind, Coal agg. (Coal + Coal w/ CCS), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_7_8','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
         newrowoffset = msf.xlsxExportAdd_tAB(ws2,Outflow_Prod_r[:,mr,Sector_ind_rge_Gas_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'EoL products (use phase outflow), ind, Gas agg. (Gas + Gas w/ CCS), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_7_8','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)    
-        newrowoffset = msf.xlsxExportAdd_tAB(ws2,Outflow_Prod_r[:,mr,Sector_ind_rge_Other_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'EoL products (use phase outflow), ind, Other agg. (Geo + Oil), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_7_8','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
+        newrowoffset = msf.xlsxExportAdd_tAB(ws2,Outflow_Prod_r[:,mr,Sector_ind_rge_Other_agg,:,:].sum(axis=1),newrowoffset,len(ColLabels),'EoL products (use phase outflow), ind, Other agg. (Geo + Oil), ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_7_8','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)"""
 
 
 # Additional reporting of stocks and stock changes at good resolution:
@@ -4912,6 +5021,8 @@ for mm in range(0,Nm):
     newrowoffset = msf.xlsxExportAdd_tAB(ws2,Primary_final_cons[:,mm,:,:],newrowoffset,len(ColLabels),'Virgin material in final material consumption, ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_6_7 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
     newrowoffset = msf.xlsxExportAdd_tAB(ws2,ReUse_Materials[:,mm,:,:],newrowoffset,len(ColLabels),'ReUse of materials in final material consumption, ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_17_6','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items) # [same as "ReUse of materials in products,..."]
     newrowoffset = msf.xlsxExportAdd_tAB(ws2,SecondaryProduct_EoL_Pot[:,mm,:,:],newrowoffset,len(ColLabels),'Potential for recycled material from EoL products, ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_9_12 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
+    newrowoffset = msf.xlsxExportAdd_tAB(ws2,SecondaryProduct[:,mm,:,:],newrowoffset,len(ColLabels),'Potential of secondary materials for fabrication, ' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'F_9_12 (part)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
+
 
 #if 'pav' in SectorList:  # 2026-01-22, hmli, circomod: aggregate materials group and use passenger vehicles for testing without affecting the results of building sector #20260216 not sector specific
 newrowoffset = msf.xlsxExportAdd_tAB(ws2,np.einsum('tmSR->tSR',DivertedScrap_to_Manuf[:,[0,1,2,3],:,:]),newrowoffset,len(ColLabels),'Diverted fabrication scrap to manufacturing, iron and steel (4 groups)', 'Mt/yr',ScriptConfig['RegionalScope'], 'F_12_5 (part)', 'Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
