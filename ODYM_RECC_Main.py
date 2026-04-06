@@ -2305,13 +2305,18 @@ for mS in range(2,NS): #SSP2 only
                 inflow_ESM[:, :, :, wind_offshore_other_idx, :] = 0                
 
                 # 1.1.2 Split stocks
+                original_on_reported_stock = reported_stock[:, :, :, wind_onshore_other_idx, :]
+                original_off_reported_stock = reported_stock[:, :, :, wind_offshore_other_idx, :]
                 original_on_stock  = stock_ESM_2023[:, :, :, wind_onshore_other_idx, :]   # (30, 3, 2, 161)
                 original_off_stock = stock_ESM_2023[:, :, :, wind_offshore_other_idx, :]  # (30, 3, 2, 161)
 
                 stock_ESM_2023[:, :, :, wind_on_idx, :]  = original_on_stock[:, :, :, np.newaxis, :]  * wind_on_shares   # (30,3,2,4,161)
                 stock_ESM_2023[:, :, :, wind_off_idx, :] = original_off_stock[:, :, :, np.newaxis, :] * wind_off_shares  # (30,3,2,6,161)
-                reported_stock[:, :, :, wind_on_idx, t_2023:]  = original_on_stock[:, :, :, np.newaxis, idx_2023:]  * wind_on_shares[:,idx_2023:]   # (30,3,2,4,161)
-                reported_stock[:, :, :, wind_off_idx, t_2023:] = original_off_stock[:, :, :, np.newaxis, idx_2023:] * wind_off_shares[:,idx_2023:]  # (30,3,2,6,161)
+                reported_stock[:, :, :, wind_on_idx, t_2023:]  = original_on_reported_stock[:, :, :, np.newaxis, t_2023:]  * wind_on_shares[:,idx_2023:]   # (30,3,2,4,161)
+                reported_stock[:, :, :, wind_off_idx, t_2023:] = original_off_reported_stock[:, :, :, np.newaxis, t_2023:] * wind_off_shares[:,idx_2023:]  # (30,3,2,6,161)
+                # overwrite reported_stock fr year 2023 with stock_ESM_2023 to account for the right age_cohort composition and market shares 
+                reported_stock[:, :, :, wind_on_idx, t_2023]  = stock_ESM_2023[:, :, :, wind_on_idx, :].sum(axis=-1)  # sum over cohorts
+                reported_stock[:, :, :, wind_off_idx, t_2023] = stock_ESM_2023[:, :, :, wind_off_idx, :].sum(axis=-1)
 
                 # check: sum over sub-techs per year must equal original
                 recon_on_stock  = stock_ESM_2023[:, :, :, wind_on_idx, :].sum(axis=3)   # (30,3,2,161)
@@ -2540,7 +2545,6 @@ for mS in range(2,NS): #SSP2 only
                     # ------------------------------------------------------------------
                     # 4c) COMBINE both parts and store
                     # ------------------------------------------------------------------
-
                     Stock_Detail_UsePhase_I[t_2023:, :, I, r]   = new_s_c + hist_s_c
                     Outflow_Detail_UsePhase_I[t_2023:, :, I, r] = new_o_c + hist_o_c
 
