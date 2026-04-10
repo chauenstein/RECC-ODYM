@@ -2269,49 +2269,67 @@ for mS in range(2,NS): #SSP2 only
             # =============================================================================
             # 1.1) Decide if techs should be split into subtechs using market shares
             # =============================================================================
-            split_by_market_share = True
-
-            if split_by_market_share == True:
-
+            if ScriptConfig['split_by_market_share'] == 'True':
+                
                 market_shares = RECC_System.ParameterDict['3_SHA_RECC_industry_market_shares'].Values[:,:] #shape Ic
-                #get indexes
+                market_shares_electrolyzer = RECC_System.ParameterDict['3_SHA_RECC_industry_market_shares_2023_electrolyzers_region_specific'].Values[:,:] #shape rI
+                
+                # get indexes
+
                 wind_onshore_other_idx = Sector_ind_list.index('Wind|Onshore|Other (Not Elsewhere Specified)')
                 wind_offshore_other_idx = Sector_ind_list.index('Wind|Offshore|Other (Not Elsewhere Specified)')
                 wind_on_idx = np.where(np.isin(Sector_ind_list, ['Wind|Onshore|DFIG', 'Wind|Onshore|PMSG-GB', 'Wind|Onshore|EESG-DD', 'Wind|Onshore|PMSG-DD']))[0]
                 wind_off_idx = np.where(np.isin(Sector_ind_list, ['Wind|Offshore|DFIG', 'Wind|Offshore|EESG-DD', 'Wind|Offshore|PMSG-GB', 'Wind|Offshore|SCIG-FC', 'Wind|Offshore|PMSG-DD', 'Wind|Offshore|HTS']))[0]
+                electrolyzer_other_idx = Sector_ind_list.index('Electrolysis|Other (Not Elsewhere Specified)')
+                electrolyzer_idx = np.where(np.isin(Sector_ind_list, ['Electrolysis|AEL', 'Electrolysis|PEMEL', 'Electrolysis|SOEL', 'Electrolysis|AEMEL']))[0]
 
                 wind_on_shares  = market_shares[wind_on_idx, :]   # shape (4, 161)
                 wind_off_shares = market_shares[wind_off_idx, :]  # shape (6, 161)
+                electrolyzer_shares = market_shares[electrolyzer_idx, :] # shape (4, 161)
 
                 # 1.1.1 Split inflows
                 original_on_inflow  = inflow_ESM[:, :, :, wind_onshore_other_idx, :]   # (30, 3, 2, 161)
                 original_off_inflow = inflow_ESM[:, :, :, wind_offshore_other_idx, :]  # (30, 3, 2, 161)
+                original_electrolyzer_inflow = inflow_ESM[:, :, :, electrolyzer_other_idx, :]  # (30, 3, 2, 161)
 
                 inflow_ESM[:, :, :, wind_on_idx, :]  = original_on_inflow[:, :, :, np.newaxis, :]  * wind_on_shares   # (30,3,2,4,161)
                 inflow_ESM[:, :, :, wind_off_idx, :] = original_off_inflow[:, :, :, np.newaxis, :] * wind_off_shares  # (30,3,2,6,161)
+                inflow_ESM[:, :, :, electrolyzer_idx, :] = original_electrolyzer_inflow[:, :, :, np.newaxis, :] * electrolyzer_shares # (30,3,2,4,161)
 
                 # check: sum over sub-techs per year must equal original
                 recon_on_inflow  = inflow_ESM[:, :, :, wind_on_idx, :].sum(axis=3)   # (30,3,2,161)
                 recon_off_inflow = inflow_ESM[:, :, :, wind_off_idx, :].sum(axis=3)  # (30,3,2,161)
+                recon_electrolyzer_inflow = inflow_ESM[:, :, :, electrolyzer_idx, :].sum(axis=3)  # (30,3,2,161)
 
                 if not np.allclose(recon_on_inflow, original_on_inflow, atol=1e-10):
                     raise ValueError(f"Onshore sub-tech inflows do not sum back to original! Max deviation: {np.abs(recon_on_inflow - original_on_inflow).max():.2e}")
                 if not np.allclose(recon_off_inflow, original_off_inflow, atol=1e-10):
                     raise ValueError(
                         f"Offshore sub-tech inflows do not sum back to original! Max deviation: {np.abs(recon_off_inflow - original_off_inflow).max():.2e}")
+                if not np.allclose(recon_electrolyzer_inflow, original_electrolyzer_inflow, atol=1e-10):
+                    raise ValueError(
+                        f"Electrolyzer sub-tech inflows do not sum back to original! Max deviation: {np.abs(recon_electrolyzer_inflow - original_electrolyzer_inflow).max():.2e}")
 
                 # set original aggregated entries to zero to avoid double counting
                 inflow_ESM[:, :, :, wind_onshore_other_idx, :]  = 0
-                inflow_ESM[:, :, :, wind_offshore_other_idx, :] = 0                
+                inflow_ESM[:, :, :, wind_offshore_other_idx, :] = 0
+                inflow_ESM[:, :, :, electrolyzer_other_idx, :] = 0
 
                 # 1.1.2 Split stocks
                 original_on_reported_stock = reported_stock[:, :, :, wind_onshore_other_idx, :]
                 original_off_reported_stock = reported_stock[:, :, :, wind_offshore_other_idx, :]
-                original_on_stock  = stock_ESM_2023[:, :, :, wind_onshore_other_idx, :]   # (30, 3, 2, 161)
-                original_off_stock = stock_ESM_2023[:, :, :, wind_offshore_other_idx, :]  # (30, 3, 2, 161)
+                original_on_stock_ESM_2023  = stock_ESM_2023[:, :, :, wind_onshore_other_idx, :]   # (30, 3, 2, 161)
+                original_off_stock_ESM_2023 = stock_ESM_2023[:, :, :, wind_offshore_other_idx, :]  # (30, 3, 2, 161)
+                
+                #electrolyzer 
+                original_electrolyzer_reported_stock = reported_stock[:, :, :, electrolyzer_other_idx, :].copy()  # (30, 3, 2, 46)
+                reported_stock[:, :, :, electrolyzer_idx, t_2023] = np.einsum('rSR,rI->rSRI',original_electrolyzer_reported_stock[:, :, :, t_2023], market_shares_electrolyzer[:,electrolyzer_idx])
+                reported_stock[:, :, :, electrolyzer_idx, t_2023+1:] = np.einsum('rSRt,It->rSRIt',original_electrolyzer_reported_stock[:, :, :, t_2023+1:], market_shares[electrolyzer_idx,idx_2023+1:])
+                stock_ESM_2023[:,:,:,electrolyzer_idx,:] = np.einsum('rSRI,rIc->rSRIc', reported_stock[:,:,:,electrolyzer_idx,t_2023], stock_age_cohort_distribution[:,electrolyzer_idx,:])  # (30, 3, 2, 4, 161)
 
-                stock_ESM_2023[:, :, :, wind_on_idx, :]  = original_on_stock[:, :, :, np.newaxis, :]  * wind_on_shares   # (30,3,2,4,161)
-                stock_ESM_2023[:, :, :, wind_off_idx, :] = original_off_stock[:, :, :, np.newaxis, :] * wind_off_shares  # (30,3,2,6,161)
+                #wind
+                stock_ESM_2023[:, :, :, wind_on_idx, :]  = original_on_stock_ESM_2023[:, :, :, np.newaxis, :]  * wind_on_shares   # (30,3,2,4,161)
+                stock_ESM_2023[:, :, :, wind_off_idx, :] = original_off_stock_ESM_2023[:, :, :, np.newaxis, :] * wind_off_shares  # (30,3,2,6,161)
                 reported_stock[:, :, :, wind_on_idx, t_2023:]  = original_on_reported_stock[:, :, :, np.newaxis, t_2023:]  * wind_on_shares[:,idx_2023:]   # (30,3,2,4,161)
                 reported_stock[:, :, :, wind_off_idx, t_2023:] = original_off_reported_stock[:, :, :, np.newaxis, t_2023:] * wind_off_shares[:,idx_2023:]  # (30,3,2,6,161)
                 # overwrite reported_stock fr year 2023 with stock_ESM_2023 to account for the right age_cohort composition and market shares 
@@ -2321,18 +2339,25 @@ for mS in range(2,NS): #SSP2 only
                 # check: sum over sub-techs per year must equal original
                 recon_on_stock  = stock_ESM_2023[:, :, :, wind_on_idx, :].sum(axis=3)   # (30,3,2,161)
                 recon_off_stock = stock_ESM_2023[:, :, :, wind_off_idx, :].sum(axis=3)  # (30,3,2,161)
+                recon_electrolyzer_stock = stock_ESM_2023[:, :, :, electrolyzer_idx, :].sum(axis=(3,4))  # (30,3,2)
 
-                if not np.allclose(recon_on_stock, original_on_stock, atol=1e-10):
-                    raise ValueError(f"Onshore sub-tech stocks do not sum back to original! Max deviation: {np.abs(recon_on_stock - original_on_stock).max():.2e}")
-                if not np.allclose(recon_off_stock, original_off_stock, atol=1e-10):
+                if not np.allclose(recon_on_stock, original_on_stock_ESM_2023, atol=1e-10):
+                    raise ValueError(f"Onshore sub-tech stocks do not sum back to original! Max deviation: {np.abs(recon_on_stock - original_on_stock_ESM_2023).max():.2e}")
+                if not np.allclose(recon_off_stock, original_off_stock_ESM_2023, atol=1e-10):
                     raise ValueError(
-                        f"Offshore sub-tech stocks do not sum back to original! Max deviation: {np.abs(recon_off_stock - original_off_stock).max():.2e}")
+                        f"Offshore sub-tech stocks do not sum back to original! Max deviation: {np.abs(recon_off_stock - original_off_stock_ESM_2023).max():.2e}")
+                if not np.allclose(recon_electrolyzer_stock[:,:,:], original_electrolyzer_reported_stock[:, :, :, t_2023], atol=1e-10):
+                    raise ValueError(
+                        f"Electrolyzer sub-tech stocks do not sum back to original! Max deviation: {np.abs(recon_electrolyzer_stock[:,:,:] - original_electrolyzer_reported_stock[:, :, :, t_2023]).max():.2e}")
 
                 # set original aggregated entries to zero to avoid double counting
                 stock_ESM_2023[:, :, :, wind_onshore_other_idx, :]  = 0
                 stock_ESM_2023[:, :, :, wind_offshore_other_idx, :] = 0
+                stock_ESM_2023[:, :, :, electrolyzer_other_idx, :] = 0 #should be zero anyways
                 reported_stock[:, :, :, wind_onshore_other_idx, :]  = 0
                 reported_stock[:, :, :, wind_offshore_other_idx, :] = 0
+                reported_stock[:, :, :, electrolyzer_other_idx, :] = 0 
+
 
             # =============================================================================
             # 2) Create empty containers
@@ -2397,13 +2422,18 @@ for mS in range(2,NS): #SSP2 only
                             # 1) first_zero_rel > 0: retirement does not happen immediately in 2023 (stock is non-zero in 2023)
                             # 2) np.all(zero_mask[first_zero_rel:]): stock stays zero from that point onward (no recovery)
                             t_retire_abs = idx_2023 + first_zero_rel  # convert relative Nt index to absolute Nc=161 index space
-                            Mylog.info(f"Early retirement detected in region {Sector_ind_regions[r]} for technology {Sector_ind_list[I]}. Survival function will be scaled accordingly to meet early retirement path.")
+                            if I == Sector_ind_list.index('Wind|Offshore|DFIG'): #exclude DFIG offshore from early retirement, as market shares drop to zero in 2020 but stock will not be zero
+                                t_retire_abs = None
                         else:
                             # Zero occurs at t=2023 itself, or stock recovers after going to zero -> not a valid early retirement
                             t_retire_abs = None
                     else:
                         # Stock remains non-zero throughout -> no early retirement
                         t_retire_abs = None
+
+                    if t_retire_abs is not None:
+                        Mylog.info(f"Early retirement detected in region {Sector_ind_regions[r]} for technology {Sector_ind_list[I]}. Survival function will be scaled accordingly to meet early retirement path.")
+                    
 
                     # ------------------------------------------------------------------
                     # Detect flat stock (no decommissioning) for technology I
