@@ -2255,6 +2255,9 @@ for mS in range(2,NS): #SSP2 only
             # 1) Import data (stock, age_cohort distribution, inflows from ESM)
             # =============================================================================
             stock_age_cohort_distribution = RECC_System.ParameterDict['3_SHA_RECC_industry_AgeCohortDistribution'].Values[:,:,:] #shape rIc with only values for selected reference year (as stated in param file) #now 2023 for REMod
+            #check if age_cohort distribution sums to 1 for each region and industry type:
+            '''if not np.allclose(stock_age_cohort_distribution.sum(axis=2), 1):
+                Mylog.warning('Age cohort distribution for industry does not sum to 1 for all regions and industry types. Check parameter file and data processing.')'''
             inflow_ESM = RECC_System.ParameterDict['1_F_RECC_FinalProducts_industry'].Values[:,:,:,:,:].copy() #dimensions: rSRIc 
             idx_2023 = SwitchTime + 7 #index 123
             inflow_ESM [:,:,:,:,:idx_2023+1] = 0 #set inflow to year 2023 to zero
@@ -2275,31 +2278,45 @@ for mS in range(2,NS): #SSP2 only
                 market_shares_electrolyzer = RECC_System.ParameterDict['3_SHA_RECC_industry_market_shares_2023_electrolyzers_region_specific'].Values[:,:] #shape rI
                 
                 # get indexes
-
+                # wind
                 wind_onshore_other_idx = Sector_ind_list.index('Wind|Onshore|Other (Not Elsewhere Specified)')
                 wind_offshore_other_idx = Sector_ind_list.index('Wind|Offshore|Other (Not Elsewhere Specified)')
                 wind_on_idx = np.where(np.isin(Sector_ind_list, ['Wind|Onshore|DFIG', 'Wind|Onshore|PMSG-GB', 'Wind|Onshore|EESG-DD', 'Wind|Onshore|PMSG-DD']))[0]
                 wind_off_idx = np.where(np.isin(Sector_ind_list, ['Wind|Offshore|DFIG', 'Wind|Offshore|EESG-DD', 'Wind|Offshore|PMSG-GB', 'Wind|Offshore|SCIG-FC', 'Wind|Offshore|PMSG-DD', 'Wind|Offshore|HTS']))[0]
+                # electrolyzer
                 electrolyzer_other_idx = Sector_ind_list.index('Electrolysis|Other (Not Elsewhere Specified)')
                 electrolyzer_idx = np.where(np.isin(Sector_ind_list, ['Electrolysis|AEL', 'Electrolysis|PEMEL', 'Electrolysis|SOEL', 'Electrolysis|AEMEL']))[0]
+                # pv
+                pv_rooftop_other_idx = Sector_ind_list.index('Solar|PV|Rooftop|Other (Not Elsewhere Specified)')
+                pv_ground_other_idx = Sector_ind_list.index('Solar|PV|Ground-mounted|Other (Not Elsewhere Specified)')
+                pv_rooftop_sub_techs_idx = np.where(np.isin(Sector_ind_list, ['Solar|PV|Rooftop|CIGS', 'Solar|PV|Rooftop|PERC', 'Solar|PV|Rooftop|SHJ', 'Solar|PV|Rooftop|PST', 'Solar|PV|Rooftop|TOPCon']))[0]
+                pv_ground_sub_techs_idx = np.where(np.isin(Sector_ind_list, ['Solar|PV|Ground-mounted|CIGS', 'Solar|PV|Ground-mounted|PERC', 'Solar|PV|Ground-mounted|SHJ', 'Solar|PV|Ground-mounted|PST', 'Solar|PV|Ground-mounted|TOPCon']))[0]
 
                 wind_on_shares  = market_shares[wind_on_idx, :]   # shape (4, 161)
                 wind_off_shares = market_shares[wind_off_idx, :]  # shape (6, 161)
                 electrolyzer_shares = market_shares[electrolyzer_idx, :] # shape (4, 161)
+                pv_rooftop_shares = market_shares[pv_rooftop_sub_techs_idx, :] # shape (5, 161)
+                pv_ground_shares = market_shares[pv_ground_sub_techs_idx, :] # shape (5, 161)
 
                 # 1.1.1 Split inflows
                 original_on_inflow  = inflow_ESM[:, :, :, wind_onshore_other_idx, :]   # (30, 3, 2, 161)
                 original_off_inflow = inflow_ESM[:, :, :, wind_offshore_other_idx, :]  # (30, 3, 2, 161)
                 original_electrolyzer_inflow = inflow_ESM[:, :, :, electrolyzer_other_idx, :]  # (30, 3, 2, 161)
+                original_pv_rooftop_inflow = inflow_ESM[:, :, :, pv_rooftop_other_idx, :]  # (30, 3, 2, 161)
+                original_pv_ground_inflow = inflow_ESM[:, :, :, pv_ground_other_idx, :]  # (30, 3, 2, 161)
 
                 inflow_ESM[:, :, :, wind_on_idx, :]  = original_on_inflow[:, :, :, np.newaxis, :]  * wind_on_shares   # (30,3,2,4,161)
                 inflow_ESM[:, :, :, wind_off_idx, :] = original_off_inflow[:, :, :, np.newaxis, :] * wind_off_shares  # (30,3,2,6,161)
                 inflow_ESM[:, :, :, electrolyzer_idx, :] = original_electrolyzer_inflow[:, :, :, np.newaxis, :] * electrolyzer_shares # (30,3,2,4,161)
+                inflow_ESM[:, :, :, pv_rooftop_sub_techs_idx, :] = original_pv_rooftop_inflow[:, :, :, np.newaxis, :] * pv_rooftop_shares # (30,3,2,5,161)
+                inflow_ESM[:, :, :, pv_ground_sub_techs_idx, :] = original_pv_ground_inflow[:, :, :, np.newaxis, :] * pv_ground_shares # (30,3,2,5,161)
 
                 # check: sum over sub-techs per year must equal original
                 recon_on_inflow  = inflow_ESM[:, :, :, wind_on_idx, :].sum(axis=3)   # (30,3,2,161)
                 recon_off_inflow = inflow_ESM[:, :, :, wind_off_idx, :].sum(axis=3)  # (30,3,2,161)
                 recon_electrolyzer_inflow = inflow_ESM[:, :, :, electrolyzer_idx, :].sum(axis=3)  # (30,3,2,161)
+                recon_pv_rooftop_inflow = inflow_ESM[:, :, :, pv_rooftop_sub_techs_idx, :].sum(axis=3)  # (30,3,2,161)
+                recon_pv_ground_inflow = inflow_ESM[:, :, :, pv_ground_sub_techs_idx, :].sum(axis=3)  # (30,3,2,161)
 
                 if not np.allclose(recon_on_inflow, original_on_inflow, atol=1e-10):
                     raise ValueError(f"Onshore sub-tech inflows do not sum back to original! Max deviation: {np.abs(recon_on_inflow - original_on_inflow).max():.2e}")
@@ -2309,37 +2326,61 @@ for mS in range(2,NS): #SSP2 only
                 if not np.allclose(recon_electrolyzer_inflow, original_electrolyzer_inflow, atol=1e-10):
                     raise ValueError(
                         f"Electrolyzer sub-tech inflows do not sum back to original! Max deviation: {np.abs(recon_electrolyzer_inflow - original_electrolyzer_inflow).max():.2e}")
+                if not np.allclose(recon_pv_rooftop_inflow, original_pv_rooftop_inflow, atol=1e-10):
+                    raise ValueError(
+                        f"PV rooftop sub-tech inflows do not sum back to original! Max deviation: {np.abs(recon_pv_rooftop_inflow - original_pv_rooftop_inflow).max():.2e}")
+                if not np.allclose(recon_pv_ground_inflow, original_pv_ground_inflow, atol=1e-10):
+                    raise ValueError(
+                        f"PV ground sub-tech inflows do not sum back to original! Max deviation: {np.abs(recon_pv_ground_inflow - original_pv_ground_inflow).max():.2e}")
 
                 # set original aggregated entries to zero to avoid double counting
                 inflow_ESM[:, :, :, wind_onshore_other_idx, :]  = 0
                 inflow_ESM[:, :, :, wind_offshore_other_idx, :] = 0
                 inflow_ESM[:, :, :, electrolyzer_other_idx, :] = 0
+                inflow_ESM[:, :, :, pv_rooftop_other_idx, :] = 0
+                inflow_ESM[:, :, :, pv_ground_other_idx, :] = 0
 
                 # 1.1.2 Split stocks
+                # wind
                 original_on_reported_stock = reported_stock[:, :, :, wind_onshore_other_idx, :]
                 original_off_reported_stock = reported_stock[:, :, :, wind_offshore_other_idx, :]
                 original_on_stock_ESM_2023  = stock_ESM_2023[:, :, :, wind_onshore_other_idx, :]   # (30, 3, 2, 161)
                 original_off_stock_ESM_2023 = stock_ESM_2023[:, :, :, wind_offshore_other_idx, :]  # (30, 3, 2, 161)
                 
-                #electrolyzer 
-                original_electrolyzer_reported_stock = reported_stock[:, :, :, electrolyzer_other_idx, :].copy()  # (30, 3, 2, 46)
-                reported_stock[:, :, :, electrolyzer_idx, t_2023] = np.einsum('rSR,rI->rSRI',original_electrolyzer_reported_stock[:, :, :, t_2023], market_shares_electrolyzer[:,electrolyzer_idx])
-                reported_stock[:, :, :, electrolyzer_idx, t_2023+1:] = np.einsum('rSRt,It->rSRIt',original_electrolyzer_reported_stock[:, :, :, t_2023+1:], market_shares[electrolyzer_idx,idx_2023+1:])
-                stock_ESM_2023[:,:,:,electrolyzer_idx,:] = np.einsum('rSRI,rIc->rSRIc', reported_stock[:,:,:,electrolyzer_idx,t_2023], stock_age_cohort_distribution[:,electrolyzer_idx,:])  # (30, 3, 2, 4, 161)
-
-                #wind
                 stock_ESM_2023[:, :, :, wind_on_idx, :]  = original_on_stock_ESM_2023[:, :, :, np.newaxis, :]  * wind_on_shares   # (30,3,2,4,161)
                 stock_ESM_2023[:, :, :, wind_off_idx, :] = original_off_stock_ESM_2023[:, :, :, np.newaxis, :] * wind_off_shares  # (30,3,2,6,161)
                 reported_stock[:, :, :, wind_on_idx, t_2023:]  = original_on_reported_stock[:, :, :, np.newaxis, t_2023:]  * wind_on_shares[:,idx_2023:]   # (30,3,2,4,161)
                 reported_stock[:, :, :, wind_off_idx, t_2023:] = original_off_reported_stock[:, :, :, np.newaxis, t_2023:] * wind_off_shares[:,idx_2023:]  # (30,3,2,6,161)
-                # overwrite reported_stock fr year 2023 with stock_ESM_2023 to account for the right age_cohort composition and market shares 
+                # overwrite reported_stock for year 2023 with stock_ESM_2023 to account for the right age_cohort composition and market shares 
                 reported_stock[:, :, :, wind_on_idx, t_2023]  = stock_ESM_2023[:, :, :, wind_on_idx, :].sum(axis=-1)  # sum over cohorts
                 reported_stock[:, :, :, wind_off_idx, t_2023] = stock_ESM_2023[:, :, :, wind_off_idx, :].sum(axis=-1)
+
+                # electrolyzer 
+                original_electrolyzer_reported_stock = reported_stock[:, :, :, electrolyzer_other_idx, :].copy()  # (30, 3, 2, 46)
+                reported_stock[:, :, :, electrolyzer_idx, t_2023] = np.einsum('rSR,rI->rSRI',original_electrolyzer_reported_stock[:, :, :, t_2023], market_shares_electrolyzer[:,electrolyzer_idx])
+                reported_stock[:, :, :, electrolyzer_idx, t_2023+1:] = np.einsum('rSRt,It->rSRIt',original_electrolyzer_reported_stock[:, :, :, t_2023+1:], market_shares[electrolyzer_idx,idx_2023+1:])
+                stock_ESM_2023[:,:,:,electrolyzer_idx,:] = np.einsum('rSRI,rIc->rSRIc', reported_stock[:,:,:,electrolyzer_idx,t_2023], stock_age_cohort_distribution[:,electrolyzer_idx,:])  # (30, 3, 2, 4, 161)
+                
+                # pv
+                original_pv_rooftop_stock = reported_stock[:, :, :, pv_rooftop_other_idx, :] # (30, 3, 2, 46)
+                original_pv_ground_stock = reported_stock[:, :, :, pv_ground_other_idx, :] # (30, 3, 2, 46)
+                original_pv_rooftop_stock_ESM_2023 = stock_ESM_2023[:, :, :, pv_rooftop_other_idx, :] # (30, 3, 2, 161)
+                original_pv_ground_stock_ESM_2023 = stock_ESM_2023[:, :, :, pv_ground_other_idx, :] # (30, 3, 2, 161)
+
+                stock_ESM_2023[:, :, :, pv_rooftop_sub_techs_idx, :] = np.einsum('rSRc,Ic->rSRIc', original_pv_rooftop_stock_ESM_2023, pv_rooftop_shares) # (30, 3, 2, 5, 161)
+                stock_ESM_2023[:, :, :, pv_ground_sub_techs_idx, :] = np.einsum('rSRc,Ic->rSRIc', original_pv_ground_stock_ESM_2023, pv_ground_shares) # (30, 3, 2, 5, 161)
+                reported_stock[:, :, :, pv_rooftop_sub_techs_idx, t_2023:] = np.einsum('rSRt,It->rSRIt', original_pv_rooftop_stock[:, :, :, t_2023:], pv_rooftop_shares[:,idx_2023:]) # (30, 3, 2, 5, 161)
+                reported_stock[:, :, :, pv_ground_sub_techs_idx, t_2023:] = np.einsum('rSRt,It->rSRIt', original_pv_ground_stock[:, :, :, t_2023:], pv_ground_shares[:,idx_2023:]) # (30, 3, 2, 5, 161)
+                #overwrite reported_stock for year 2023 with stock_ESM_2023 to account for the right age_cohort composition and market shares
+                reported_stock[:, :, :, pv_rooftop_sub_techs_idx, t_2023] = stock_ESM_2023[:, :, :, pv_rooftop_sub_techs_idx, :].sum(axis=-1) # sum over cohorts
+                reported_stock[:, :, :, pv_ground_sub_techs_idx, t_2023] = stock_ESM_2023[:, :, :, pv_ground_sub_techs_idx, :].sum(axis=-1) # sum over cohorts
 
                 # check: sum over sub-techs per year must equal original
                 recon_on_stock  = stock_ESM_2023[:, :, :, wind_on_idx, :].sum(axis=3)   # (30,3,2,161)
                 recon_off_stock = stock_ESM_2023[:, :, :, wind_off_idx, :].sum(axis=3)  # (30,3,2,161)
                 recon_electrolyzer_stock = stock_ESM_2023[:, :, :, electrolyzer_idx, :].sum(axis=(3,4))  # (30,3,2)
+                recon_pv_rooftop_stock = stock_ESM_2023[:, :, :, pv_rooftop_sub_techs_idx, :].sum(axis=3)  # (30,3,2,161)
+                recon_pv_ground_stock = stock_ESM_2023[:, :, :, pv_ground_sub_techs_idx, :].sum(axis=3)  # (30,3,2,161)
 
                 if not np.allclose(recon_on_stock, original_on_stock_ESM_2023, atol=1e-10):
                     raise ValueError(f"Onshore sub-tech stocks do not sum back to original! Max deviation: {np.abs(recon_on_stock - original_on_stock_ESM_2023).max():.2e}")
@@ -2349,14 +2390,25 @@ for mS in range(2,NS): #SSP2 only
                 if not np.allclose(recon_electrolyzer_stock[:,:,:], original_electrolyzer_reported_stock[:, :, :, t_2023], atol=1e-10):
                     raise ValueError(
                         f"Electrolyzer sub-tech stocks do not sum back to original! Max deviation: {np.abs(recon_electrolyzer_stock[:,:,:] - original_electrolyzer_reported_stock[:, :, :, t_2023]).max():.2e}")
+                if not np.allclose(recon_pv_rooftop_stock, original_pv_rooftop_stock_ESM_2023, atol=1e-10):
+                    raise ValueError(
+                        f"PV rooftop sub-tech stocks do not sum back to original! Max deviation: {np.abs(recon_pv_rooftop_stock - original_pv_rooftop_stock_ESM_2023).max():.2e}")
+                if not np.allclose(recon_pv_ground_stock, original_pv_ground_stock_ESM_2023, atol=1e-10):
+                    raise ValueError(
+                        f"PV ground sub-tech stocks do not sum back to original! Max deviation: {np.abs(recon_pv_ground_stock - original_pv_ground_stock_ESM_2023).max():.2e}")
 
                 # set original aggregated entries to zero to avoid double counting
                 stock_ESM_2023[:, :, :, wind_onshore_other_idx, :]  = 0
                 stock_ESM_2023[:, :, :, wind_offshore_other_idx, :] = 0
                 stock_ESM_2023[:, :, :, electrolyzer_other_idx, :] = 0 #should be zero anyways
+                stock_ESM_2023[:, :, :, pv_rooftop_other_idx, :] = 0
+                stock_ESM_2023[:, :, :, pv_ground_other_idx, :] = 0
+                
                 reported_stock[:, :, :, wind_onshore_other_idx, :]  = 0
                 reported_stock[:, :, :, wind_offshore_other_idx, :] = 0
-                reported_stock[:, :, :, electrolyzer_other_idx, :] = 0 
+                reported_stock[:, :, :, electrolyzer_other_idx, :] = 0
+                reported_stock[:, :, :, pv_rooftop_other_idx, :] = 0
+                reported_stock[:, :, :, pv_ground_other_idx, :] = 0
 
 
             # =============================================================================
