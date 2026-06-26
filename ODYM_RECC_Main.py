@@ -2899,7 +2899,10 @@ for mS in range(2,NS): #SSP2 only
         else:    
             Par_RECC_EoL_RR =  np.einsum('t,grmw->trmgw',np.ones((Nt)),RECC_System.ParameterDict['4_PY_EoL_RecoveryRate'].Values[:,:,:,:,0] *0.01)
             Par_RECC_WoodWaste_Cascading = np.einsum('t,wmWr->twmWr',np.ones((Nt)),RECC_System.ParameterDict['4_PY_WoodCascading'].Values * 0.01)
-        
+
+        if (Par_RECC_EoL_RR < 0).any():
+            raise ValueError(f"Negative values found in Par_RECC_EoL_RR: min = {Par_RECC_EoL_RR.min()}")
+                
         # For regional dimension 11 and 1
         #Par_RECC_EoL_RR_Nl = np.einsum('l,t,Lmw->tlmLw',np.ones((Nl)),np.ones((Nt)),RECC_System.ParameterDict['4_PY_EoL_RecoveryRate'].Values[Sector_11reg_rge,0,:,:,0] *0.01)
         Par_RECC_EoL_RR_No = np.einsum('o,t,Omw->tomOw',np.ones((No)),np.ones((Nt)),RECC_System.ParameterDict['4_PY_EoL_RecoveryRate'].Values[Sector_1reg_rge,0,:,:,0] *0.01)
