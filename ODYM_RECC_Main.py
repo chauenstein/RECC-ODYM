@@ -562,6 +562,7 @@ Waste_loc     = IndexTable.Classification[IndexTable.index.get_loc('Waste_Scrap'
 Waste_industries = IndexTable.Classification[IndexTable.index.get_loc('WasteManagementIndustries')].Items
 Elements_loc = IndexTable.Classification[IndexTable.index.get_loc('Element')].Items
 
+MaterialProductionProcess_loc = IndexTable.Classification[IndexTable.index.get_loc('MaterialProductionProcess')].Items
 Cement_loc    = IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items.index('cement')
 Concrete_loc  = IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items.index('concrete')
 ConcrAgg_loc  = IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items.index('concrete aggregates')
@@ -1189,9 +1190,9 @@ direct_impact = np.einsum('Xn,xX,Pn->Px',
                      )  # Impact/kg mat
 # Electricity generation
 elec_production = np.einsum('P,Pi,ix->Px',
-                    ParameterDict['4_EI_ProcessEnergyIntensity'].Values[:,Electric_loc,0,0],    # MJ el/kg mat
-                    Par_ElectricityMix_P[:,0,:,0],              # MJ industry/MJ el        
-                    ParameterDict['4_PE_ProcessExtensions_Industry'].Values[:,:,0,0]/3.6        # impact/MJ industry 
+                    ParameterDict['4_EI_ProcessEnergyIntensity'].Values[:,Electric_loc,0,0],    # MJ el/kg mat #dimension: Pnto (material production, energy carrier, time, worldregion)
+                    Par_ElectricityMix_P[:,0,:,0],              # MJ industry/MJ el                            #dimension: PRIt
+                    ParameterDict['4_PE_ProcessExtensions_Industry'].Values[:,:,0,0]/3.6        # impact/MJ industry #dimension: Ixot
                      )  # Impact/kg mat
 # compute residuals
 residuals = ParameterDict['4_PE_ProcessExtensions_Materials'].Values[:,:,0,0] - fuel_production - direct_impact - elec_production   # Index_ Px, Unit: [impact unit]/kg mat
@@ -1313,6 +1314,13 @@ StockCurves_Mat_nrb              = np.zeros((Nt,Nm,NS,NR))
 StockCurves_Mat_ind              = np.zeros((Nt,Nm,NS,NR)) 
 Inflow_Prod                      = np.zeros((Nt,Ng,NS,NR))
 Inflow_Prod_r                    = np.zeros((Nt,Nr,Ng,NS,NR))
+primary_material_demand_by_tech  = np.zeros((Nt,NI,Nm,NS,NR))
+primary_material_demand_by_tech_and_element = np.zeros((Nt,NI,Nm,Ne,NS,NR))
+primary_material_demand_tmeSR = np.zeros((Nt,Nm,Ne,NS,NR))
+EoL_forRemelting                 = np.zeros((Nt,NI,Nm,Nw,Ne,NS,NR))
+SecondaryProduct_EoL_Potential_by_tech_waste_element = np.zeros((Nt,NI,Nm,Nw,Ne,NS,NR))
+SecondaryProduct_EoL_Potential_by_tech_and_element = np.zeros((Nt,NI,Nm,Ne,NS,NR))
+SecondaryProduct_EoL_Potential_by_tech = np.zeros((Nt,NI,Nm,NS,NR))
 Outflow_Prod                     = np.zeros((Nt,Ng,NS,NR))
 Outflow_Prod_r                   = np.zeros((Nt,Nr,Ng,NS,NR))
 EoL_Products_for_WasteMgt        = np.zeros((Nt,Ng,NS,NR))
@@ -2496,7 +2504,9 @@ for mS in range(2,NS): #SSP2 only
                             # 1) first_zero_rel > 0: retirement does not happen immediately in 2023 (stock is non-zero in 2023)
                             # 2) np.all(zero_mask[first_zero_rel:]): stock stays zero from that point onward (no recovery)
                             t_retire_abs = idx_2023 + first_zero_rel  # convert relative Nt index to absolute Nc=161 index space
-                            if I == Sector_ind_list.index('Wind|Offshore|DFIG'): #exclude DFIG offshore from early retirement, as market shares drop to zero in 2020 but stock will not be zero
+                            if 'Wind|Offshore|DFIG' in Sector_ind_list and I == Sector_ind_list.index('Wind|Offshore|DFIG'):
+                                t_retire_abs = None
+                            else:
                                 t_retire_abs = None
                         else:
                             # Zero occurs at t=2023 itself, or stock recovers after going to zero -> not a valid early retirement
@@ -2609,11 +2619,12 @@ for mS in range(2,NS): #SSP2 only
                     #     so its cohort dimension c is Nc=161 based
                     # -----------------------------------------------------------------------------------------
 
+                    use_conditional_survival = False  # <-- flip this flag to switch between the two approaches
+
                     hist_s_c_full = np.zeros((Nc, Nc))
                     hist_o_c_full = np.zeros((Nc, Nc))
 
                     for c in range(idx_2023 + 1):  # iterate over all historic cohorts (1900-2023)
-                        
                         sf_at_2023 = sf[idx_2023, c]
                         if sf_at_2023 <= 0:
                             # Cohort c has zero survival probability at 2023 -> all assets already retired by 2023
@@ -2626,10 +2637,21 @@ for mS in range(2,NS): #SSP2 only
                             # No stock present for this cohort in 2023 -> nothing to project forward
                             continue
 
-                        cond_sf = sf[idx_2023:, c] / sf_at_2023  #Compute conditional survival (renormalization of original SF)
+                        n_fwd = Nc - idx_2023  # number of remaining timesteps from 2023 onward
+
+                        if use_conditional_survival:
+                            # Conditional survival (Bayes' Theorem): renormalize by sf_at_2023.
+                            # Assumes survivors to 2023 are hardier than average -> slower decay going forward.
+                            cond_sf = sf[idx_2023:, c] / sf_at_2023
+                        else:
+                            # Original/naive SF: take the survival curve starting from age 0 (row c, where sf[c,c]=1),
+                            # not from row 0 -- sf[t,c] is only defined/nonzero for t >= c (age = t - c).
+                            # Scaled to match the known 2023 stock at t=idx_2023.
+                            cond_sf = sf[c:c + n_fwd, c].copy()
 
                         if t_retire_abs is not None:
-                            # if early retirement case -> apply linear ramp-down as before, but now to the conditional survival function "cond_sf"
+                            # if early retirement case -> apply linear ramp-down as before, but now to "cond_sf"
+                            # (either the conditional or the naive-restart SF, depending on the flag above)
                             # and expressed relative to idx_2023 (not relative to cohort birth year c) since we are projecting from 2023
                             retire_rel = t_retire_abs - idx_2023  # both Nc-based
                             ramp = np.zeros(len(cond_sf))
@@ -2639,9 +2661,9 @@ for mS in range(2,NS): #SSP2 only
                         elif flat_stock:
                             cond_sf = np.ones(len(cond_sf))
 
-                        hist_s_c_full[idx_2023:, c] = stock_2023_c * cond_sf  #project historic stock of cohort c forward from 2023 using cond_sf
+                        hist_s_c_full[idx_2023:, c] = stock_2023_c * cond_sf  # project historic stock of cohort c forward from 2023
 
-                    hist_o_c_full[1:, :] = np.maximum(-np.diff(hist_s_c_full, axis=0), 0) #np.maximum(-diff, 0) keeps only decreases in stock (outflows), and sets increases to zero (not relevant but more safe)
+                    hist_o_c_full[1:, :] = np.maximum(-np.diff(hist_s_c_full, axis=0), 0)  # keep only decreases in stock (outflows)
 
                     hist_s_c = hist_s_c_full[idx_2023:, :]  # (Nt, Nc), Nc-based slice
                     hist_o_c = hist_o_c_full[idx_2023:, :]  # (Nt, Nc), Nc-based slice
@@ -3271,7 +3293,8 @@ for mS in range(2,NS): #SSP2 only
                 RECC_System.FlowDict['F_8_9_No'].Values[t,:,:,:,:]    = np.einsum('coOme->oOme',RECC_System.FlowDict['F_7_8_No'].Values[t,0:CohortOffset,:,:,:,:] - RECC_System.FlowDict['F_8_0_No'].Values[t,0:CohortOffset,:,:,:,:] - RECC_System.FlowDict['F_8_17_No'].Values[t,0:CohortOffset,:,:,:,:])
             
             # 4) EoL products to postconsumer scrap: trwe. Add Waste mgt. losses.
-            RECC_System.FlowDict['F_9_10'].Values[t,:,:,:]            = np.einsum('rmgw,rgme->rwe',Par_RECC_EoL_RR[t,:,:,:,:],RECC_System.FlowDict['F_8_9'].Values[t,:,:,:,:]) 
+            RECC_System.FlowDict['F_9_10'].Values[t,:,:,:]            = np.einsum('rmgw,rgme->rwe',Par_RECC_EoL_RR[t,:,:,:,:],RECC_System.FlowDict['F_8_9'].Values[t,:,:,:,:])
+            EoL_forRemelting[t,:,:,:,:,mS,mR] = np.einsum('rmIw,rIme->Imwe',Par_RECC_EoL_RR[t,:,:,:,:],RECC_System.FlowDict['F_8_9'].Values[t,:,:,:,:]) # (Nt,NI,Nm,Nw,Ne,NS,NR)
             Collected_Scrap_F_9_10_trgmwSR[t,:,:,:,:,mS,mR] = np.einsum('rmgw,rgm->rgmw',Par_RECC_EoL_RR[t,:,:,:,:],RECC_System.FlowDict['F_8_9'].Values[t,:,:,:,0]) # for reporting of collected scrap by material, good and region
             '''if len(Sector_11reg_rge) > 0:                    
                 RECC_System.FlowDict['F_9_10_Nl'].Values[t,:,:,:]     = np.einsum('lmLw,lLme->lwe',Par_RECC_EoL_RR_Nl[t,:,:,:,:],RECC_System.FlowDict['F_8_9_Nl'].Values[t,:,:,:,:])    '''
@@ -4072,6 +4095,9 @@ but partially outside of RECC_System.')
         # N) Calculate other indicators
         # Secondary material from EoL material flows only, part of F_9_12, for reporting only:
         SecondaryProduct_EoL_Potential = np.einsum('twe,wmeP->tme',RECC_System.FlowDict['F_9_10'].Values.sum(axis=1),RECC_System.ParameterDict['4_PY_MaterialProductionRemelting'].Values[:,:,:,:,0,0])
+        SecondaryProduct_EoL_Potential_by_tech_waste_element[:,:,:,:,:,mS,mR] = np.einsum('tImwe,Imwe->tImwe', EoL_forRemelting[:,:,:,:,:,mS,mR], np.einsum('I,wmeW->Imwe', np.ones((NI)), RECC_System.ParameterDict['4_PY_MaterialProductionRemelting'].Values[:,:,:,:,0,0]))
+        SecondaryProduct_EoL_Potential_by_tech_and_element[:,:,:,:,mS,mR] = np.einsum('tImwe->tIme', SecondaryProduct_EoL_Potential_by_tech_waste_element[:,:,:,:,:,mS,mR])
+        SecondaryProduct_EoL_Potential_by_tech[:,:,:,mS,mR] = np.einsum('tImwe->tIm',SecondaryProduct_EoL_Potential_by_tech_waste_element[:,:,:,:,:,mS,mR])
         SecondaryProduct_EoL_Potential[:,:,0] = np.einsum('tme->tm',SecondaryProduct_EoL_Potential[:,:,1::])
         
         # O) Compile results
@@ -4284,6 +4310,15 @@ but partially outside of RECC_System.')
             Stock_2020_ind[:,:,mS,mR]               = Stock_2020_decline_I.sum(axis=1) 
             StockCurves_Mat_ind[:,:,mS,mR]          = np.einsum('gtcrm->tm',RECC_System.StockDict['S_7'].Values[:,:,:,Sector_ind_rge,:,0])
         
+        #reporting for Souverän CARA model, 17.07.2026, mg
+        if 'ind' in SectorList:
+            inflows_usephase_tIm = np.einsum('trIm->tIm',RECC_System.FlowDict['F_6_7'].Values[:,:,:,:,0].copy())
+            material_loss_factor = 1 / (1 - np.einsum('mwIgto->tIm',RECC_System.ParameterDict['4_PY_Manufacturing'].Values))
+            primary_material_demand_by_tech[:,:,:,mS,mR] = np.einsum('tIm,tIm->tIm', inflows_usephase_tIm, material_loss_factor) #to account for the losses in manufacturing
+            primary_material_demand_by_tech_and_element[:,:,:,:,mS,mR] = np.einsum('tIm,me->tIme', primary_material_demand_by_tech[:,:,:,mS,mR], RECC_System.ParameterDict['3_MC_Elements_Materials_Primary'].Values.copy())
+            primary_material_demand_tmeSR[:,:,:,mS,mR] = np.einsum('tIme->tme', primary_material_demand_by_tech_and_element[:,:,:,:,mS,mR])
+
+
         # Additional reporting for CIRCOMOD, 2025-01-20, ch
         Material_Inflow_pr_pg[:,:,:,:,mS,mR]                = RECC_System.FlowDict['F_6_7'].Values[:,:,:,:,0].copy()
         if 'tis' in SectorList: #2026-01-27 add tis F_7_8           
@@ -4602,6 +4637,19 @@ for mm in range(0,Nm):
     newrowoffset = msf.xlsxExportAdd_tAB(ws2,Impacts_PrimaryMaterial_3di_m[GWP100_loc,:,mm,:,:],newrowoffset,len(ColLabels),'GHG emissions, production of primary _3di_' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'Env. extension of F_3_4','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
 for mm in range(0,Nm):
     newrowoffset = msf.xlsxExportAdd_tAB(ws2,Impacts_SecondaryMetal_di_m[GWP100_loc,:,mm,:,:],newrowoffset,len(ColLabels),'GHG emissions, production of secondary _di_' + IndexTable.Classification[IndexTable.index.get_loc('Engineering materials')].Items[mm],'Mt/yr',ScriptConfig['RegionalScope'],'E_9_0 (part) and associated em. in E_15_0','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
+#for Souverän CARA reporting
+if 'ind' in SectorList: 
+    for I in range(0,NI):
+        for mm in range(0,Nm):
+            newrowoffset = msf.xlsxExportAdd_tAB(ws2,primary_material_demand_by_tech[:,I,mm,:,:], newrowoffset, len(ColLabels), f'total material demand by technology: {Sector_ind_list[I]}, {Materials_loc[mm]}', 'Vehicles: million/yr, Buildings: million m2/yr, TranspInf: kt/yr, PowerSec: Mt/yr', ScriptConfig['RegionalScope'],'F_4_5 + F_12_5','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
+            newrowoffset = msf.xlsxExportAdd_tAB(ws2,SecondaryProduct_EoL_Potential_by_tech[:,I,mm,:,:], newrowoffset, len(ColLabels), f'secondary material supply potential by technology, material: {Sector_ind_list[I]}, {Materials_loc[mm]}', 'Vehicles: million/yr, Buildings: million m2/yr, TranspInf: kt/yr, PowerSec: Mt/yr', ScriptConfig['RegionalScope'],'F_9_12','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
+            for e in range(0,Ne):
+                newrowoffset = msf.xlsxExportAdd_tAB(ws2,primary_material_demand_by_tech_and_element[:,I,mm,e,:,:], newrowoffset, len(ColLabels), f'total material demand by technology, element: {Sector_ind_list[I]}, {Materials_loc[mm]}, {Elements_loc[e]}', 'Vehicles: million/yr, Buildings: million m2/yr, TranspInf: kt/yr, PowerSec: Mt/yr', ScriptConfig['RegionalScope'],'F_4_5 + F_12_5 (element)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
+                newrowoffset = msf.xlsxExportAdd_tAB(ws2,SecondaryProduct_EoL_Potential_by_tech_and_element[:,I,mm,e,:,:], newrowoffset, len(ColLabels), f'secondary material supply potential by technology, element: {Sector_ind_list[I]}, {Materials_loc[mm]}, {Elements_loc[e]}', 'Vehicles: million/yr, Buildings: million m2/yr, TranspInf: kt/yr, PowerSec: Mt/yr', ScriptConfig['RegionalScope'],'F_9_12 (element)','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
+    for mm in range(0,Nm):
+        for e in range(0,Ne):
+            newrowoffset = msf.xlsxExportAdd_tAB(ws2,primary_material_demand_tmeSR[:,mm,e,:,:], newrowoffset, len(ColLabels), f'aggregated total material demand: {Materials_loc[mm]}, {Elements_loc[e]}', 'Vehicles: million/yr, Buildings: million m2/yr, TranspInf: kt/yr, PowerSec: Mt/yr', ScriptConfig['RegionalScope'],'F_4_5 + F_12_5','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
+
 # inflow and outflow of commodities
 for mg in range(0,Ng):
     newrowoffset = msf.xlsxExportAdd_tAB(ws2,Inflow_Prod[:,mg,:,:],newrowoffset,len(ColLabels),'final consumption (use phase inflow), ' + IndexTable.Classification[IndexTable.index.get_loc('Good')].Items[mg],'Vehicles: million/yr, Buildings: million m2/yr, TranspInf: kt/yr, PowerSec: GW/yr',ScriptConfig['RegionalScope'],'F_6_7','Cf. Cover sheet',IndexTable.Classification[IndexTable.index.get_loc('Scenario')].Items,IndexTable.Classification[IndexTable.index.get_loc('Scenario_RCP')].Items)
