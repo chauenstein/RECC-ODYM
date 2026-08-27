@@ -3339,9 +3339,27 @@ for mS in range(2,NS): #SSP2 only
             '''RECC_System.FlowDict['F_10_9'].Values[t,:,:,:]     = np.einsum('owe->owe',np.einsum('we,o->owe',RECC_System.FlowDict['F_9_10'].Values[t,:,:,:].sum(axis=0) + RECC_System.FlowDict['F_9_10_Nl'].Values[t,:,:,:].sum(axis=0) + RECC_System.FlowDict['F_9_10_No'].Values[t,:,:,:].sum(axis=0),np.ones(No)) + RECC_System.StockDict['S_10'].Values[t-1,t-1,:,:,:].copy()) - np.einsum('wme,o->owe',Fabscrapdiversionpotential_twme[t,:,:,:],np.ones(No)).copy()'''           
             RECC_System.FlowDict['F_10_9'].Values[t,:,Woodwaste_loc,Carbon_loc] = 0
             RECC_System.FlowDict['F_10_9w'].Values[t,:,:,:]    = RECC_System.StockDict['S_10w'].Values[t-1,t-1,:,:,:].copy()
-            RECC_System.FlowDict['F_10_9w'].Values[t,:,Woodwaste_loc,Carbon_loc] += RECC_System.FlowDict['F_9_10'].Values[t,:,Woodwaste_loc,Carbon_loc]            
-            RECC_System.FlowDict['F_9_12'].Values[t,:,:,:]     = np.einsum('owe,wmePo->ome',RECC_System.FlowDict['F_10_9'].Values[t,:,:,:],RECC_System.ParameterDict['4_PY_MaterialProductionRemelting'].Values[:,:,:,:,0,:])
-            RECC_System.FlowDict['F_9_12'].Values[t,:,:,0]     = np.einsum('ome->om',RECC_System.FlowDict['F_9_12'].Values[t,:,:,1::])
+            RECC_System.FlowDict['F_10_9w'].Values[t,:,Woodwaste_loc,Carbon_loc] += RECC_System.FlowDict['F_9_10'].Values[t,:,Woodwaste_loc,Carbon_loc]   
+            
+            if ScriptConfig['Include_REStrategy_MaterialProductionRemeltingImprovement'] == 'True':
+                Par_Remelting = RECC_System.ParameterDict['4_PY_MaterialProductionRemelting'].Values[:,:,:,:,0,:] \
+                    + np.einsum('o,wmePo->wmePo',
+                                RECC_System.ParameterDict['3_SHA_RECC_REStrategyScaleUp'].Values[mR,:,t,mS],
+                                RECC_System.ParameterDict['6_PR_MaterialProductionRemeltingImprovement'].Values[:,:,:,:,0,:])
+            else:
+                Par_Remelting = RECC_System.ParameterDict['4_PY_MaterialProductionRemelting'].Values[:,:,:,:,0,:]
+
+            assert Par_Remelting.max() <= 1 + 1e-9 and Par_Remelting.min() >= -1e-9, \
+                'Remelting yield out of [0,1] in year %s: min %.6f, max %.6f at (w,m,e,P,o) = %s' \
+                % (IndexTable.Classification[IndexTable.index.get_loc('Time')].Items[t],
+                Par_Remelting.min(), Par_Remelting.max(),
+                np.unravel_index(np.argmax(Par_Remelting), Par_Remelting.shape))
+
+            RECC_System.FlowDict['F_9_12'].Values[t,:,:,:] = np.einsum('owe,wmePo->ome',
+                RECC_System.FlowDict['F_10_9'].Values[t,:,:,:], Par_Remelting)
+            RECC_System.FlowDict['F_9_12'].Values[t,:,:,0] = np.einsum('ome->om',
+                RECC_System.FlowDict['F_9_12'].Values[t,:,:,1::])
+
             # Calculate cascade input from EoL for results:
             # SysVar_EoLCascEntry[t,:,mS,mR]                    += np.einsum('r,r->r',Par_RECC_WoodWaste_Cascading[t,Woodwaste_loc,Wood_loc,Woodwaste_loc,:],RECC_System.FlowDict['F_9_10'].Values[t,:,Woodwaste_loc,Carbon_loc])
             SysVar_EoLCascEntry[t,:,mS,mR]                    += np.einsum('r,r->r',Par_RECC_WoodWaste_Cascading[t,Woodwaste_loc,Wood_loc,Woodwastemgt_loc,:],RECC_System.FlowDict['F_9_10'].Values[t,:,Woodwaste_loc,Carbon_loc]) # 2025-06-10: use Woodwastemgt_loc instead of Woodwaste_loc
@@ -6165,6 +6183,8 @@ if ScriptConfig['IncludeRecycling'] == 'False':
     REStratList.append('NoR')
 if ScriptConfig['No_EE_Improvements'] == 'True':        
     REStratList.append('NoEE')
+if ScriptConfig['Include_REStrategy_MaterialProductionRemeltingImprovement'] == 'True':        
+    REStratList.append('MPR')
     
 FirstFlag = True
 if len(REStratList) > 0:
