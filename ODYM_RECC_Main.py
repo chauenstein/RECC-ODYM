@@ -2321,7 +2321,12 @@ for mS in range(2,NS): #SSP2 only
             reported_stock = RECC_System.ParameterDict['2_S_RECC_FinalProducts_industry'].Values
             t_2023 = 8 # Nt index of year 2023  
             stock_ESM_2023_raw = reported_stock[:,:,:,:,t_2023] #shape rSRI, now selected for reference year 2023
-            lifetimes = np.einsum('r,Ic->Irc',np.ones((Nr)),RECC_System.ParameterDict['3_LT_RECC_ProductLifetime_industry'].Values)
+
+            weibull_scale = np.einsum('r,Ic->Irc', np.ones((Nr)), RECC_System.ParameterDict['3_LT_RECC_ProductLifetime_industry_weibull_scale'].Values)  # lambda, years
+            weibull_shape = np.einsum('r,Ic->Irc', np.ones((Nr)), RECC_System.ParameterDict['3_LT_RECC_ProductLifetime_industry_weibull_shape'].Values)  # k, dimensionless
+            # compute_sf leaves sf = 0 where Shape == 0, which would silently remove stock
+            if np.any(weibull_scale <= 0) or np.any(weibull_shape <= 0):
+                raise ValueError('Weibull scale/shape contains zeros or negatives for selected industry items or cohorts. Check 3_LT parameter files and ProcMethod.')            
             
             #assign age_cohort dimension to 2023 stock
             stock_ESM_2023 = np.einsum("rSRI,rIc -> rSRIc", stock_ESM_2023_raw, stock_age_cohort_distribution)
@@ -2505,11 +2510,10 @@ for mS in range(2,NS): #SSP2 only
 
             for I in range(NI):
                 for r in range(Nr):
-                    LifeTimes = lifetimes[I, r, :]  # shape (Nc,) — mean lifetime per cohort year
                     lt = {
-                        'Type'  : 'Normal',
-                        'Mean'  : LifeTimes,
-                        'StdDev': 0.3 * LifeTimes
+                        'Type'  : 'Weibull',
+                        'Shape': weibull_shape[I, r, :],   # k per cohort
+                        'Scale': weibull_scale[I, r, :]    # lambda per cohort, years
                     }
                     sf = dsm.DynamicStockModel(time_dsm, i=Inflow_zeros, lt=lt).compute_sf()
                     # Ensure no same-year outflow (preserves mass balance at cohort birth year)
